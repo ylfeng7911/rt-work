@@ -1,0 +1,125 @@
+W0723 19:21:04.985852 1606263 site-packages/torch/distributed/run.py:766] 
+W0723 19:21:04.985852 1606263 site-packages/torch/distributed/run.py:766] *****************************************
+W0723 19:21:04.985852 1606263 site-packages/torch/distributed/run.py:766] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0723 19:21:04.985852 1606263 site-packages/torch/distributed/run.py:766] *****************************************
+Traceback (most recent call last):
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/train.py", line 10, in <module>
+    from src.misc import dist_utils
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/../src/__init__.py", line 5, in <module>
+    from . import optim
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/../src/optim/__init__.py", line 4, in <module>
+    from .ema import *
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/../src/optim/ema.py", line 12, in <module>
+    from ..misc import dist_utils
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/../src/misc/__init__.py", line 4, in <module>
+    from .logger import *
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/../src/misc/logger.py", line 16, in <module>
+    from .dist_utils import is_dist_available_and_initialized, get_world_size
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/../src/misc/dist_utils.py", line 25, in <module>
+    from ..data import DataLoader 
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/../src/data/__init__.py", line 4, in <module>
+    from .dataset import *
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/../src/data/dataset/__init__.py", line 6, in <module>
+    from .coco_dataset import CocoDetection
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/../src/data/dataset/coco_dataset.py", line 9, in <module>
+    from faster_coco_eval.utils.pytorch import FasterCocoDetection
+ModuleNotFoundError: No module named 'faster_coco_eval'
+Traceback (most recent call last):
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/train.py", line 10, in <module>
+    from src.misc import dist_utils
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/../src/__init__.py", line 5, in <module>
+    from . import optim
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/../src/optim/__init__.py", line 4, in <module>
+    from .ema import *
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/../src/optim/ema.py", line 12, in <module>
+    from ..misc import dist_utils
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/../src/misc/__init__.py", line 4, in <module>
+    from .logger import *
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/../src/misc/logger.py", line 16, in <module>
+    from .dist_utils import is_dist_available_and_initialized, get_world_size
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/../src/misc/dist_utils.py", line 25, in <module>
+    from ..data import DataLoader 
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/../src/data/__init__.py", line 4, in <module>
+    from .dataset import *
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/../src/data/dataset/__init__.py", line 6, in <module>
+    from .coco_dataset import CocoDetection
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/../src/data/dataset/coco_dataset.py", line 9, in <module>
+    from faster_coco_eval.utils.pytorch import FasterCocoDetection
+ModuleNotFoundError: No module named 'faster_coco_eval'
+Traceback (most recent call last):
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/train.py", line 10, in <module>
+    from src.misc import dist_utils
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/../src/__init__.py", line 5, in <module>
+    from . import optim
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/../src/optim/__init__.py", line 4, in <module>
+    from .ema import *
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/../src/optim/ema.py", line 12, in <module>
+    from ..misc import dist_utils
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/../src/misc/__init__.py", line 4, in <module>
+    from .logger import *
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/../src/misc/logger.py", line 16, in <module>
+    from .dist_utils import is_dist_available_and_initialized, get_world_size
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/../src/misc/dist_utils.py", line 25, in <module>
+    from ..data import DataLoader 
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/../src/data/__init__.py", line 4, in <module>
+    from .dataset import *
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/../src/data/dataset/__init__.py", line 6, in <module>
+    from .coco_dataset import CocoDetection
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/../src/data/dataset/coco_dataset.py", line 9, in <module>
+    from faster_coco_eval.utils.pytorch import FasterCocoDetection
+ModuleNotFoundError: No module named 'faster_coco_eval'
+Traceback (most recent call last):
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/train.py", line 10, in <module>
+    from src.misc import dist_utils
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/../src/__init__.py", line 5, in <module>
+    from . import optim
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/../src/optim/__init__.py", line 4, in <module>
+    from .ema import *
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/../src/optim/ema.py", line 12, in <module>
+    from ..misc import dist_utils
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/../src/misc/__init__.py", line 4, in <module>
+    from .logger import *
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/../src/misc/logger.py", line 16, in <module>
+    from .dist_utils import is_dist_available_and_initialized, get_world_size
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/../src/misc/dist_utils.py", line 25, in <module>
+    from ..data import DataLoader 
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/../src/data/__init__.py", line 4, in <module>
+    from .dataset import *
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/../src/data/dataset/__init__.py", line 6, in <module>
+    from .coco_dataset import CocoDetection
+  File "/mnt/fengyulei_space/rtdetrv2_pytorch/tools/../src/data/dataset/coco_dataset.py", line 9, in <module>
+    from faster_coco_eval.utils.pytorch import FasterCocoDetection
+ModuleNotFoundError: No module named 'faster_coco_eval'
+W0723 19:21:08.815698 1606263 site-packages/torch/distributed/elastic/multiprocessing/api.py:900] Sending process 1606314 closing signal SIGTERM
+W0723 19:21:08.817078 1606263 site-packages/torch/distributed/elastic/multiprocessing/api.py:900] Sending process 1606315 closing signal SIGTERM
+W0723 19:21:08.817672 1606263 site-packages/torch/distributed/elastic/multiprocessing/api.py:900] Sending process 1606316 closing signal SIGTERM
+E0723 19:21:08.853111 1606263 site-packages/torch/distributed/elastic/multiprocessing/api.py:874] failed (exitcode: 1) local_rank: 3 (pid: 1606317) of binary: /mnt/fengyulei_space/Software/anaconda3/envs/ddetr/bin/python3.9
+Traceback (most recent call last):
+  File "/mnt/fengyulei_space/Software/anaconda3/envs/ddetr/bin/torchrun", line 8, in <module>
+    sys.exit(main())
+  File "/mnt/fengyulei_space/Software/anaconda3/envs/ddetr/lib/python3.9/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 355, in wrapper
+    return f(*args, **kwargs)
+  File "/mnt/fengyulei_space/Software/anaconda3/envs/ddetr/lib/python3.9/site-packages/torch/distributed/run.py", line 892, in main
+    run(args)
+  File "/mnt/fengyulei_space/Software/anaconda3/envs/ddetr/lib/python3.9/site-packages/torch/distributed/run.py", line 883, in run
+    elastic_launch(
+  File "/mnt/fengyulei_space/Software/anaconda3/envs/ddetr/lib/python3.9/site-packages/torch/distributed/launcher/api.py", line 139, in __call__
+    return launch_agent(self._config, self._entrypoint, list(args))
+  File "/mnt/fengyulei_space/Software/anaconda3/envs/ddetr/lib/python3.9/site-packages/torch/distributed/launcher/api.py", line 270, in launch_agent
+    raise ChildFailedError(
+torch.distributed.elastic.multiprocessing.errors.ChildFailedError: 
+============================================================
+tools/train.py FAILED
+------------------------------------------------------------
+Failures:
+  <NO_OTHER_FAILURES>
+------------------------------------------------------------
+Root Cause (first observed failure):
+[0]:
+  time      : 2025-07-23_19:21:08
+  host      : 3090-4s
+  rank      : 3 (local_rank: 3)
+  exitcode  : 1 (pid: 1606317)
+  error_file: <N/A>
+  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+============================================================
