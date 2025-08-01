@@ -36,32 +36,33 @@ class ConvNormLayer(nn.Module):
 
 
 
-class ASFF(nn.Module):
+class ASFF(nn.Module):      #输入：3个不同尺度的特征图，输出：选定尺度的融合特征图
     def __init__(self, level, rfb=False, vis=False):        #从高到低
         super(ASFF, self).__init__()
         self.level = level
         self.dim = [256,256,256]
         self.inter_dim = self.dim[self.level]
         if level==0:
-            self.stride_level_1 = ConvNormLayer(256, self.inter_dim, 3, 2, act='relu',groups=32)
-            self.stride_level_2 = ConvNormLayer(256, self.inter_dim, 3, 2, act='relu',groups=32)
-            self.expand = ConvNormLayer(self.inter_dim, 256, 3, 1, act='relu',groups=32)
+            self.stride_level_1 = ConvNormLayer(256, self.inter_dim, 3, 2, act='silu',groups=8)
+            self.stride_level_2 = ConvNormLayer(256, self.inter_dim, 3, 2, act='silu',groups=8)
+            self.expand = ConvNormLayer(self.inter_dim, 256, 3, 1, act='silu',groups=8)
         elif level==1:
-            # self.compress_level_0 = ConvNormLayer(512, self.inter_dim, 1, 1, act='relu',groups=32)    不用通道调整，直接上采样
-            self.stride_level_2 = ConvNormLayer(256, self.inter_dim, 3, 2, act='relu',groups=32)
-            self.expand = ConvNormLayer(self.inter_dim, 256, 3, 1, act='relu',groups=32)
+            # self.compress_level_0 = ConvNormLayer(512, self.inter_dim, 1, 1, act='silu',groups=32)    不用通道调整，直接上采样
+            self.stride_level_2 = ConvNormLayer(256, self.inter_dim, 3, 2, act='silu',groups=8)
+            self.expand = ConvNormLayer(self.inter_dim, 256, 3, 1, act='silu',groups=8)
         elif level==2:
-            # self.compress_level_0 = ConvNormLayer(512, self.inter_dim, 1, 1, act='relu',groups=32)
-            self.expand = ConvNormLayer(self.inter_dim, 256, 3, 1, act='relu',groups=32)
+            # self.compress_level_0 = ConvNormLayer(512, self.inter_dim, 1, 1, act='silu',groups=32)
+            self.expand = ConvNormLayer(self.inter_dim, 256, 3, 1, act='silu',groups=8)
 
         compress_c = 8 if rfb else 16  #when adding rfb, we use half number of channels to save memory
 
-        self.weight_level_0 = ConvNormLayer(self.inter_dim, compress_c, 1, 1, act='relu')
-        self.weight_level_1 = ConvNormLayer(self.inter_dim, compress_c, 1, 1, act='relu')
-        self.weight_level_2 = ConvNormLayer(self.inter_dim, compress_c, 1, 1, act='relu')
+        self.weight_level_0 = ConvNormLayer(self.inter_dim, compress_c, 1, 1, act='silu')
+        self.weight_level_1 = ConvNormLayer(self.inter_dim, compress_c, 1, 1, act='silu')
+        self.weight_level_2 = ConvNormLayer(self.inter_dim, compress_c, 1, 1, act='silu')
 
         self.weight_levels = nn.Conv2d(compress_c*3, 3, kernel_size=1, stride=1, padding=0)
         self.vis= vis
+        self.dropout = nn.Dropout2d(p=0.2)  
 
 
     def forward(self, x_level_0, x_level_1, x_level_2):#3个尺度(从上往下)特征图,特征融合
@@ -98,7 +99,7 @@ class ASFF(nn.Module):
         if self.vis:
             return out, levels_weight, fused_out_reduced.sum(dim=1)
         else:
-            return out
+            return self.dropout(out)
         
         
 
@@ -311,22 +312,22 @@ class HybridEncoder(nn.Module):
             TransformerEncoder(copy.deepcopy(encoder_layer), num_encoder_layers) for _ in range(len(use_encoder_idx))
         ])
 
-        # # top-down fpn
-        # self.lateral_convs = nn.ModuleList()
-        # self.fpn_blocks = nn.ModuleList()
-        # for _ in range(len(in_channels) - 1, 0, -1):        #3,2
-        #     self.lateral_convs.append(ConvNormLayer(hidden_dim, hidden_dim, 1, 1, act=act)) #1卷积-归一化-激活函数     C/H/W不变
-        #     self.fpn_blocks.append(
-        #         CSPRepLayer(hidden_dim * 2, hidden_dim, round(3 * depth_mult), act=act, expansion=expansion))#3卷积-归一化-激活  C减半，H/W不变
+        # top-down fpn
+        self.lateral_convs = nn.ModuleList()
+        self.fpn_blocks = nn.ModuleList()
+        for _ in range(len(in_channels) - 1, 0, -1):        #3,2
+            self.lateral_convs.append(ConvNormLayer(hidden_dim, hidden_dim, 1, 1, act=act)) #1卷积-归一化-激活函数     C/H/W不变
+            self.fpn_blocks.append(
+                CSPRepLayer(hidden_dim * 2, hidden_dim, round(3 * depth_mult), act=act, expansion=expansion))#3卷积-归一化-激活  C减半，H/W不变
 
-        # # bottom-up pan
-        # self.downsample_convs = nn.ModuleList()
-        # self.pan_blocks = nn.ModuleList()
-        # for _ in range(len(in_channels) - 1):       #0,1
-        #     self.downsample_convs.append(ConvNormLayer(hidden_dim, hidden_dim, 3, 2, act=act))  #C不变，H/W减半
-        #     self.pan_blocks.append(
-        #         CSPRepLayer(hidden_dim * 2, hidden_dim, round(3 * depth_mult), act=act, expansion=expansion)        #C减半,H/W不变
-        #     )
+        # bottom-up pan
+        self.downsample_convs = nn.ModuleList()
+        self.pan_blocks = nn.ModuleList()
+        for _ in range(len(in_channels) - 1):       #0,1
+            self.downsample_convs.append(ConvNormLayer(hidden_dim, hidden_dim, 3, 2, act=act))  #C不变，H/W减半
+            self.pan_blocks.append(
+                CSPRepLayer(hidden_dim * 2, hidden_dim, round(3 * depth_mult), act=act, expansion=expansion)        #C减半,H/W不变
+            )
             
         #ASFF
         self.ASFF_block = nn.ModuleList([ASFF(i) for i,ch in enumerate(in_channels)])
@@ -379,28 +380,28 @@ class HybridEncoder(nn.Module):
                 memory :torch.Tensor = self.encoder[i](src_flatten, pos_embed=pos_embed)
                 proj_feats[enc_ind] = memory.permute(0, 2, 1).reshape(-1, self.hidden_dim, h, w).contiguous()   #[b,c,h,w]
 
-        # # broadcasting and fusion
-        # # FPN：inner_outs变为：从下往上3层融合特征图E1 E2 E3(代码逻辑很绕，结合论文图来看)
-        # inner_outs = [proj_feats[-1]]      
-        # for idx in range(len(self.in_channels) - 1, 0, -1):     #2,1        理解：上层（论文中F5和S4）经1x1卷积+2倍插值和下层融合
-        #     feat_heigh = inner_outs[0]          # S5    E2'
-        #     feat_low = proj_feats[idx - 1]      # S4    S3
-        #     feat_heigh = self.lateral_convs[len(self.in_channels) - 1 - idx](feat_heigh)    #1x1卷积，下标是0,1,2
-        #     inner_outs[0] = feat_heigh          # E3    E2
-        #     upsample_feat = F.interpolate(feat_heigh, scale_factor=2., mode='nearest')  #上采样
-        #     inner_out = self.fpn_blocks[len(self.in_channels)-1-idx](torch.concat([upsample_feat, feat_low], dim=1))#concat再减半C
-        #     inner_outs.insert(0, inner_out)     #[E2',E3]    
+        # broadcasting and fusion
+        # FPN：inner_outs变为：从下往上3层融合特征图E1 E2 E3(代码逻辑很绕，结合论文图来看)
+        inner_outs = [proj_feats[-1]]      
+        for idx in range(len(self.in_channels) - 1, 0, -1):     #2,1        理解：上层（论文中F5和S4）经1x1卷积+2倍插值和下层融合
+            feat_heigh = inner_outs[0]          # S5    E2'
+            feat_low = proj_feats[idx - 1]      # S4    S3
+            feat_heigh = self.lateral_convs[len(self.in_channels) - 1 - idx](feat_heigh)    #1x1卷积，下标是0,1,2
+            inner_outs[0] = feat_heigh          # E3    E2
+            upsample_feat = F.interpolate(feat_heigh, scale_factor=2., mode='nearest')  #上采样
+            inner_out = self.fpn_blocks[len(self.in_channels)-1-idx](torch.concat([upsample_feat, feat_low], dim=1))#concat再减半C
+            inner_outs.insert(0, inner_out)     #[E2',E3]    
 
-        # # PAN：outs是：E1和每一次PAN融合后的结果（尺度从下往上）
-        # outs = [inner_outs[0]]
-        # for idx in range(len(self.in_channels) - 1):        #0,1           理解：下层（论文中）经过下采样后和上层融合
-        #     feat_low = outs[-1]         # E1 第一次PAN融合的结果 
-        #     feat_height = inner_outs[idx + 1]       #E2  E3
-        #     downsample_feat = self.downsample_convs[idx](feat_low)      #下采样E3
-        #     out = self.pan_blocks[idx](torch.concat([downsample_feat, feat_height], dim=1)) #concat再减半C
-        #     outs.append(out)
+        # PAN：outs是：E1和每一次PAN融合后的结果（尺度从下往上)      [b,256,h,w]
+        outs = [inner_outs[0]]
+        for idx in range(len(self.in_channels) - 1):        #0,1           理解：下层（论文中）经过下采样后和上层融合
+            feat_low = outs[-1]         # E1 第一次PAN融合的结果 
+            feat_height = inner_outs[idx + 1]       #E2  E3
+            downsample_feat = self.downsample_convs[idx](feat_low)      #下采样E3
+            out = self.pan_blocks[idx](torch.concat([downsample_feat, feat_height], dim=1)) #concat再减半C
+            outs.append(out)
 
-        outs = [self.ASFF_block[i](proj_feats[2], proj_feats[1], proj_feats[0]) for i in range(len(self.in_channels))]
-        outs.reverse()
+        final_outs = [self.ASFF_block[i](outs[2], outs[1], outs[0]) for i in range(len(self.in_channels))] #尺度从小到大
+        final_outs.reverse()
 
-        return outs
+        return final_outs
