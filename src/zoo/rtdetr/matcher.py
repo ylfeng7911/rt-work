@@ -37,20 +37,20 @@ class HungarianMatcher(nn.Module):
             cost_giou: This is the relative weight of the giou loss of the bounding box in the matching cost
         """
         super().__init__()
-        self.cost_class = weight_dict['cost_class']
-        self.cost_bbox = weight_dict['cost_bbox']
-        self.cost_giou = weight_dict['cost_giou']
+        self.cost_class = weight_dict['cost_class'] #2
+        self.cost_bbox = weight_dict['cost_bbox']   #5
+        self.cost_giou = weight_dict['cost_giou']   #2
 
         self.use_focal_loss = use_focal_loss
-        self.alpha = alpha
-        self.gamma = gamma
+        self.alpha = alpha  #0.25
+        self.gamma = gamma  #2
 
         assert self.cost_class != 0 or self.cost_bbox != 0 or self.cost_giou != 0, "all costs cant be 0"
 
     @torch.no_grad()
     def forward(self, outputs: Dict[str, torch.Tensor], targets):
         """ Performs the matching
-
+        匹配原则：每个GT分配给一个预测，每个预测最多只匹配一个GT。多余的预测被归为“背景”。匹配目标是总代价最小，可能局部某处不是最优的匹配。
         Params:
             outputs: This is a dict that contains at least these entries:
                  "pred_logits": Tensor of dim [batch_size, num_queries, num_classes] with the classification logits
@@ -99,7 +99,7 @@ class HungarianMatcher(nn.Module):
         # Compute the giou cost betwen boxes
         cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_bbox), box_cxcywh_to_xyxy(tgt_bbox))
         
-        # Final cost matrix
+        # Final cost matrix 总代价矩阵
         C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
         C = C.view(bs, num_queries, -1).cpu()
 

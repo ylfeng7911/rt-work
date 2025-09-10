@@ -18,8 +18,8 @@ train_dataloader:
   type: DataLoader
   dataset: 
     type: CocoDetection
-    img_folder: /home/fengyulei/fengyulei_space/Data/TinyTinyCoco_format/train2017
-    ann_file: /home/fengyulei/fengyulei_space/Data/TinyTinyCoco_format/annotations/instances_train2017.json
+    img_folder: /root/autodl-tmp/TinyTinyCoco_format/train2017
+    ann_file: /root/autodl-tmp/TinyTinyCoco_format/annotations/instances_train2017.json
     return_masks: False
     transforms:
       type: Compose
@@ -35,8 +35,8 @@ val_dataloader:
   type: DataLoader
   dataset: 
     type: CocoDetection
-    img_folder: /home/fengyulei/fengyulei_space/Data/TinyTinyCoco_format/val2017
-    ann_file: /home/fengyulei/fengyulei_space/Data/TinyTinyCoco_format/annotations/instances_val2017.json
+    img_folder: /root/autodl-tmp/TinyTinyCoco_format/val2017
+    ann_file: /root/autodl-tmp/TinyTinyCoco_format/annotations/instances_val2017.json
     return_masks: False
     transforms:
       type: Compose

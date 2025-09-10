@@ -35,72 +35,92 @@ class ConvNormLayer(nn.Module):
         return self.act(self.norm(self.conv(x)))
 
 
-
-class ASFF(nn.Module):      #输入：3个不同尺度的特征图，输出：选定尺度的融合特征图
-    def __init__(self, level, rfb=False, vis=False):        #从高到低
+class ASFF(nn.Module):      # 输入：4个不同尺度的特征图，输出：选定尺度的融合特征图
+    def __init__(self, level, rfb=False, vis=False, groups = 8):        # 从高到低
         super(ASFF, self).__init__()
         self.level = level
-        self.dim = [256,256,256]
-        self.inter_dim = self.dim[self.level]
-        if level==0:
-            self.stride_level_1 = ConvNormLayer(256, self.inter_dim, 3, 2, act='silu',groups=8)
-            self.stride_level_2 = ConvNormLayer(256, self.inter_dim, 3, 2, act='silu',groups=8)
-            self.expand = ConvNormLayer(self.inter_dim, 256, 3, 1, act='silu',groups=8)
-        elif level==1:
-            # self.compress_level_0 = ConvNormLayer(512, self.inter_dim, 1, 1, act='silu',groups=32)    不用通道调整，直接上采样
-            self.stride_level_2 = ConvNormLayer(256, self.inter_dim, 3, 2, act='silu',groups=8)
-            self.expand = ConvNormLayer(self.inter_dim, 256, 3, 1, act='silu',groups=8)
-        elif level==2:
-            # self.compress_level_0 = ConvNormLayer(512, self.inter_dim, 1, 1, act='silu',groups=32)
-            self.expand = ConvNormLayer(self.inter_dim, 256, 3, 1, act='silu',groups=8)
+        self.dim = [256, 256, 256, 256]
+        self.inter_dim = self.dim[self.level]   # 256
 
-        compress_c = 8 if rfb else 16  #when adding rfb, we use half number of channels to save memory
+        if level == 0:
+            self.stride_level_1 = ConvNormLayer(256, self.inter_dim, 3, 2, act='silu', groups=groups)
+            self.stride_level_2 = ConvNormLayer(256, self.inter_dim, 3, 2, act='silu', groups=groups)
+            self.stride_level_3 = ConvNormLayer(256, self.inter_dim, 3, 2, act='silu', groups=groups)
+            self.expand = ConvNormLayer(self.inter_dim, 256, 3, 1, act='silu', groups=groups)
+
+        elif level == 1:
+            self.stride_level_2 = ConvNormLayer(256, self.inter_dim, 3, 2, act='silu', groups=groups)
+            self.stride_level_3 = ConvNormLayer(256, self.inter_dim, 3, 2, act='silu', groups=groups)
+            self.expand = ConvNormLayer(self.inter_dim, 256, 3, 1, act='silu', groups=groups)
+
+        elif level == 2:
+            self.stride_level_3 = ConvNormLayer(256, self.inter_dim, 3, 2, act='silu', groups=groups)
+            self.expand = ConvNormLayer(self.inter_dim, 256, 3, 1, act='silu', groups=groups)
+
+        elif level == 3:
+            self.expand = ConvNormLayer(self.inter_dim, 256, 3, 1, act='silu', groups=groups)
+
+        # 压缩维度
+        compress_c = 8 if rfb else 16
 
         self.weight_level_0 = ConvNormLayer(self.inter_dim, compress_c, 1, 1, act='silu')
         self.weight_level_1 = ConvNormLayer(self.inter_dim, compress_c, 1, 1, act='silu')
         self.weight_level_2 = ConvNormLayer(self.inter_dim, compress_c, 1, 1, act='silu')
+        self.weight_level_3 = ConvNormLayer(self.inter_dim, compress_c, 1, 1, act='silu')
 
-        self.weight_levels = nn.Conv2d(compress_c*3, 3, kernel_size=1, stride=1, padding=0)
-        self.vis= vis
-        self.dropout = nn.Dropout2d(p=0.2)  
+        self.weight_levels = nn.Conv2d(compress_c * 4, 4, kernel_size=1, stride=1, padding=0)
+        self.vis = vis
+        self.dropout = nn.Dropout2d(p=0.2)
 
+    def forward(self, x_level_0, x_level_1, x_level_2, x_level_3):  # 4个尺度特征图
+        if self.level == 0:
+            level_0_resized = x_level_0
+            level_1_resized = self.stride_level_1(x_level_1)
+            level_2_resized = self.stride_level_2(F.max_pool2d(x_level_2, 3, stride=2, padding=1))
+            level_3_resized = self.stride_level_3(F.max_pool2d(x_level_3, 3, stride=4, padding=1))
 
-    def forward(self, x_level_0, x_level_1, x_level_2):#3个尺度(从上往下)特征图,特征融合
-        if self.level==0:
-            level_0_resized = x_level_0     #           [b,512,h,w]
-            level_1_resized = self.stride_level_1(x_level_1)    #下采样[b,512,h,w]
-            level_2_downsampled_inter =F.max_pool2d(x_level_2, 3, stride=2, padding=1)  #下采样1
-            level_2_resized = self.stride_level_2(level_2_downsampled_inter)            #下采样2[b,512,h,w]
+        elif self.level == 1:
+            level_0_resized = F.interpolate(x_level_0, scale_factor=2, mode='nearest')
+            level_1_resized = x_level_1
+            level_2_resized = self.stride_level_2(x_level_2)
+            level_3_resized = self.stride_level_3(F.max_pool2d(x_level_3, 3, stride=2, padding=1))
 
-        elif self.level==1:
-            # level_0_compressed = self.compress_level_0(x_level_0)       #通道调节c=256
-            level_0_resized =F.interpolate(x_level_0, scale_factor=2, mode='nearest')#上采样[b,256,h,w]
-            level_1_resized =x_level_1              #[b,256,h,w]
-            level_2_resized =self.stride_level_2(x_level_2)#下采样
-        elif self.level==2:
-            # level_0_compressed = self.compress_level_0(x_level_0)
-            level_0_resized =F.interpolate(x_level_0, scale_factor=4, mode='nearest')
-            level_1_resized =F.interpolate(x_level_1, scale_factor=2, mode='nearest')
-            level_2_resized =x_level_2
+        elif self.level == 2:
+            level_0_resized = F.interpolate(x_level_0, scale_factor=4, mode='nearest')
+            level_1_resized = F.interpolate(x_level_1, scale_factor=2, mode='nearest')
+            level_2_resized = x_level_2
+            level_3_resized = self.stride_level_3(x_level_3)
 
-        level_0_weight_v = self.weight_level_0(level_0_resized) #[b,8,h,w]  每幅图对应一个8维权重
-        level_1_weight_v = self.weight_level_1(level_1_resized) #[b,8,h,w]
-        level_2_weight_v = self.weight_level_2(level_2_resized) #[b,8,h,w]
-        levels_weight_v = torch.cat((level_0_weight_v, level_1_weight_v, level_2_weight_v),1)       #[b,24,h,w]
-        levels_weight = self.weight_levels(levels_weight_v)                                         #[b,3,h,w] 每幅图对应3个权重
-        levels_weight = F.softmax(levels_weight, dim=1)         #[b,3,h,w] 
+        elif self.level == 3:
+            level_0_resized = F.interpolate(x_level_0, scale_factor=8, mode='nearest')
+            level_1_resized = F.interpolate(x_level_1, scale_factor=4, mode='nearest')
+            level_2_resized = F.interpolate(x_level_2, scale_factor=2, mode='nearest')
+            level_3_resized = x_level_3
 
-        fused_out_reduced = level_0_resized * levels_weight[:,0:1,:,:]+\
-                            level_1_resized * levels_weight[:,1:2,:,:]+\
-                            level_2_resized * levels_weight[:,2:,:,:]                       #[b,1,h,w] * [b,512,h,w]
+        # 权重计算
+        level_0_weight_v = self.weight_level_0(level_0_resized)     #[b,8,h,w]
+        level_1_weight_v = self.weight_level_1(level_1_resized)
+        level_2_weight_v = self.weight_level_2(level_2_resized)
+        level_3_weight_v = self.weight_level_3(level_3_resized)
 
-        out = self.expand(fused_out_reduced)            #[b,256,h,w]
+        levels_weight_v = torch.cat((level_0_weight_v, level_1_weight_v, level_2_weight_v, level_3_weight_v), 1)    #[b,32,h,w]
+        levels_weight = self.weight_levels(levels_weight_v)         #[b,4,h,w]
+        levels_weight = F.softmax(levels_weight, dim=1)             #[b,4,h,w]
+
+        fused_out_reduced = (
+            level_0_resized * levels_weight[:, 0:1, :, :] +
+            level_1_resized * levels_weight[:, 1:2, :, :] +
+            level_2_resized * levels_weight[:, 2:3, :, :] +
+            level_3_resized * levels_weight[:, 3:4, :, :]
+        )
+
+        out = self.expand(fused_out_reduced)
 
         if self.vis:
             return out, levels_weight, fused_out_reduced.sum(dim=1)
         else:
             return self.dropout(out)
-        
+
         
 
 
@@ -401,7 +421,7 @@ class HybridEncoder(nn.Module):
             out = self.pan_blocks[idx](torch.concat([downsample_feat, feat_height], dim=1)) #concat再减半C
             outs.append(out)
 
-        final_outs = [self.ASFF_block[i](outs[2], outs[1], outs[0]) for i in range(len(self.in_channels))] #尺度从小到大
+        final_outs = [self.ASFF_block[i](outs[3], outs[2], outs[1], outs[0]) for i in range(len(self.in_channels))] #尺度从小到大
         final_outs.reverse()
 
         return final_outs

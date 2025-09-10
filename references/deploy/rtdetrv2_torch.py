@@ -79,7 +79,7 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('-c', '--config', type=str, default='../configs/rtdetr/rtdetr_r50vd_6x_coco.yml')
-    parser.add_argument('-r', '--resume', type=str, default='../exps/20250731_171910/checkpoint0045.pth')
+    parser.add_argument('-r', '--resume', type=str, default='../exps/20250905_222714/last.pth')
     parser.add_argument('-f', '--im-file', type=str, default='../00002/00002.jpg')
     parser.add_argument('-d', '--device', type=str, default='cuda:0')      #cpu
     args = parser.parse_args()

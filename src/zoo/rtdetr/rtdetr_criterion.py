@@ -12,7 +12,7 @@ import torch.distributed
 import torch.nn.functional as F 
 import torchvision
 
-from .box_ops import box_cxcywh_to_xyxy, box_iou, generalized_box_iou
+from .box_ops import box_cxcywh_to_xyxy, box_iou, generalized_box_iou, NWD
 from ...misc.dist_utils import get_world_size, is_dist_available_and_initialized
 from ...core import register
 
@@ -47,8 +47,8 @@ class RTDETRCriterion(nn.Module):
         empty_weight[-1] = eos_coef
         self.register_buffer('empty_weight', empty_weight)
 
-        self.alpha = alpha
-        self.gamma = gamma
+        self.alpha = alpha      #0.75
+        self.gamma = gamma      #2
 
 
     def loss_labels(self, outputs, targets, indices, num_boxes, log=True):
@@ -88,31 +88,33 @@ class RTDETRCriterion(nn.Module):
 
         return {'loss_focal': loss}
 
-    def loss_labels_vfl(self, outputs, targets, indices, num_boxes, log=True):
+    def loss_labels_vfl(self, outputs, targets, indices, num_boxes, log=True):  #分类损失
         assert 'pred_boxes' in outputs
-        idx = self._get_src_permutation_idx(indices)
+        idx = self._get_src_permutation_idx(indices)    #把一个batch中所有样本合起来，变为2元素元组(batch_idx, tgt_idx)
 
-        src_boxes = outputs['pred_boxes'][idx]
-        target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
-        ious, _ = box_iou(box_cxcywh_to_xyxy(src_boxes), box_cxcywh_to_xyxy(target_boxes))
-        ious = torch.diag(ious).detach()
+        #计算batch中对应检测框和GT框的IOU
+        src_boxes = outputs['pred_boxes'][idx]      #预测框box,得到145个预测框的box
+        target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0) #一个batch中所有真值box，targets[0]['boxes'].shape=[30,4]   targets和indices按batch对其然后t, (_, i)相当于只取了targets和索引的targets部分
+        ious, _ = box_iou(box_cxcywh_to_xyxy(src_boxes), box_cxcywh_to_xyxy(target_boxes))#两个shape=[145,4]计算IOU，得到shape=[145,145]
+        ious = torch.diag(ious).detach()    #只取对应的匹配部分（匈牙利匹配输出是对应好的）
 
-        src_logits = outputs['pred_logits']
-        target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])
-        target_classes = torch.full(src_logits.shape[:2], self.num_classes,
+        #构建类别one-hot向量，用1标注出被匹配到的部分  （这里不太懂）
+        src_logits = outputs['pred_logits']     #[8,300,2]
+        target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])  #batch中所有真值类别，向量。（实际都是1）
+        target_classes = torch.full(src_logits.shape[:2], self.num_classes,     #shape=[8,300]全部填充为2(背景)
                                     dtype=torch.int64, device=src_logits.device)
-        target_classes[idx] = target_classes_o
-        target = F.one_hot(target_classes, num_classes=self.num_classes + 1)[..., :-1]
-
-        target_score_o = torch.zeros_like(target_classes, dtype=src_logits.dtype)
-        target_score_o[idx] = ious.to(target_score_o.dtype)
-        target_score = target_score_o.unsqueeze(-1) * target
-
-        pred_score = F.sigmoid(src_logits).detach()
-        weight = self.alpha * pred_score.pow(self.gamma) * (1 - target) + target_score
-        
-        loss = F.binary_cross_entropy_with_logits(src_logits, target_score, weight=weight, reduction='none')
-        loss = loss.mean(1).sum() * src_logits.shape[1] / num_boxes
+        target_classes[idx] = target_classes_o  #shape=[8,300]，被匹配的部分变为1（drone）
+        target = F.one_hot(target_classes, num_classes=self.num_classes + 1)[..., :-1]  #化为one-hot形式[8,300,2]被匹配部分是1，其他部分是0. 并且丢掉了最后一列（背景列），于是存在一些全0向量，不参与后续计算
+        #根据IOU加权one-hot向量，其中的1会变小
+        target_score_o = torch.zeros_like(target_classes, dtype=src_logits.dtype)   #[8,300]
+        target_score_o[idx] = ious.to(target_score_o.dtype)         #存放IOU                
+        target_score = target_score_o.unsqueeze(-1) * target            #[8,300,2] 用IOU加权类别one-hot
+        # 0.75 * pred_score^2 *  (1 - target) + target_score前面是负样本部分，后面是正样本部分
+        pred_score = F.sigmoid(src_logits).detach() #[8,300,2] 
+        weight = self.alpha * pred_score.pow(self.gamma) * (1 - target) + target_score  #[8,300,2] 
+        # 最终计算交叉熵LOSS
+        loss = F.binary_cross_entropy_with_logits(src_logits, target_score, weight=weight, reduction='none')    #[8,300,2]
+        loss = loss.mean(1).sum() * src_logits.shape[1] / num_boxes     #0.05
         return {'loss_vfl': loss}
 
     @torch.no_grad()
@@ -128,16 +130,16 @@ class RTDETRCriterion(nn.Module):
         card_err = F.l1_loss(card_pred.float(), tgt_lengths.float())
         losses = {'cardinality_error': card_err}
         return losses
-
+    #回归损失，分为L1和GIOU + AR
     def loss_boxes(self, outputs, targets, indices, num_boxes):
         """Compute the losses related to the bounding boxes, the L1 regression loss and the GIoU loss
            targets dicts must contain the key "boxes" containing a tensor of dim [nb_target_boxes, 4]
            The target boxes are expected in format (center_x, center_y, w, h), normalized by the image size.
         """
         assert 'pred_boxes' in outputs
-        idx = self._get_src_permutation_idx(indices)
-        src_boxes = outputs['pred_boxes'][idx]
-        target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+        idx = self._get_src_permutation_idx(indices)    #把一个batch中所有样本合起来，变为2元素元组(batch_idx, tgt_idx)
+        src_boxes = outputs['pred_boxes'][idx]  #shape=[145,4] 预测框
+        target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0) #shape=[145,4] 真实框
 
         losses = {}
 
@@ -149,10 +151,54 @@ class RTDETRCriterion(nn.Module):
         losses['loss_giou'] = loss_giou.sum() / num_boxes
         return losses
 
-    def _get_src_permutation_idx(self, indices):
+    #宽高比AR损失
+    def loss_ar(self, outputs, targets, indices, num_boxes, lambda_sup=1.0, lambda_cons=0.05):
+        """ Aspect Ratio (AR) loss: supervised + consistency """ #监督+一致性
+        assert 'pred_boxes' in outputs
+        idx = self._get_src_permutation_idx(indices)        #(batch_idx, tgt_idx)
+
+        # 取匹配到的预测框和GT框
+        src_boxes = outputs['pred_boxes'][idx]   # [N, 4], cx, cy, w, h
+        target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0) # [N, 4]
+
+        # --- 1) Supervised AR loss ---
+        # src_ar = (src_boxes[:, 2] / (src_boxes[:, 3] + 1e-6))   # w/h
+        # tgt_ar = (target_boxes[:, 2] / (target_boxes[:, 3] + 1e-6))
+        # loss_ar_sup = torch.abs(src_ar - tgt_ar).sum() / num_boxes
+
+        # --- 2) Consistency AR loss (图像级方差约束) ---
+        # 按 batch 拆分：indices 里存了每张图匹配的预测id
+        loss_ar_cons_list = []          #计算每张图中AR的方差（AR是个统计量，这里用方差衡量偏移程度）
+        for (src_idx, _) in indices:
+            if len(src_idx) > 1:  # 至少2个目标才能算方差
+                ar_vals = (outputs['pred_boxes'][:, src_idx, 2] / 
+                        (outputs['pred_boxes'][:, src_idx, 3] + 1e-6))      #outputs['pred_boxes'].shape=[b,300,4]
+                mean_ar = ar_vals.mean()
+                loss_ar_cons_list.append(((ar_vals - mean_ar) ** 2).mean())
+        loss_ar_cons = torch.stack(loss_ar_cons_list).mean() if loss_ar_cons_list else torch.tensor(0., device=src_boxes.device)
+
+        # --- 3) 总 loss ---
+        # loss = lambda_sup * loss_ar_sup + lambda_cons * loss_ar_cons
+        loss = lambda_cons * loss_ar_cons
+        return {"loss_ar": loss}
+
+    def loss_NWD(self, outputs, targets, indices, num_boxes):       
+        #NWD损失
+        assert 'pred_boxes' in outputs
+        idx = self._get_src_permutation_idx(indices)        #(batch_idx, tgt_idx)
+        # 取匹配到的预测框和GT框
+        src_boxes = outputs['pred_boxes'][idx]   # [N, 4], cx, cy, w, h
+        target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0) # [N, 4]
+        
+        losses = {}
+        loss_NWD = 1 - NWD(src_boxes,target_boxes)
+        losses['loss_NWD'] = loss_NWD.sum() / num_boxes        
+        return losses
+    
+    def _get_src_permutation_idx(self, indices):#得到预测框下标
         # permute predictions following indices
-        batch_idx = torch.cat([torch.full_like(src, i) for i, (src, _) in enumerate(indices)])
-        src_idx = torch.cat([src for (src, _) in indices])
+        batch_idx = torch.cat([torch.full_like(src, i) for i, (src, _) in enumerate(indices)])      #得到batch内样本id列表，例如[0,0,0,1,..]
+        src_idx = torch.cat([src for (src, _) in indices])                                          #得到tgt索引列表，例如[1,6,1,5,1,9...]，每个batch都有300个tgt，所以1出现多次
         return batch_idx, src_idx
 
     def _get_tgt_permutation_idx(self, indices):
@@ -164,10 +210,12 @@ class RTDETRCriterion(nn.Module):
     def get_loss(self, loss, outputs, targets, indices, num_boxes, **kwargs):
         loss_map = {
             'labels': self.loss_labels,
-            'boxes': self.loss_boxes,
+            'boxes': self.loss_boxes,                           #
             'cardinality': self.loss_cardinality,
             'focal': self.loss_labels_focal,
-            'vfl': self.loss_labels_vfl,
+            'vfl': self.loss_labels_vfl,                        #
+            'ar': self.loss_ar,                                 # new
+            'NWD':self.loss_NWD,
         }
         assert loss in loss_map, f'do you really want to compute {loss} loss?'
         return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)
@@ -178,6 +226,8 @@ class RTDETRCriterion(nn.Module):
              outputs: dict of tensors, see the output specification of the model for the format
              targets: list of dicts, such that len(targets) == batch_size.
                       The expected keys in each dict depends on the losses applied, see each loss' doc
+            outputs是个字典，有'pred_logits'，'pred_boxes'，'aux_outputs'，'dn_aux_outputs'，'dn_meta'
+            [b,300,2] , [b,300,4], [6个解码器的'pred_logits'和'pred_boxes']，[6个DN解码器的'pred_logits'和'pred_boxes']
         """
         outputs_without_aux = {k: v for k, v in outputs.items() if 'aux' not in k}
 
@@ -188,19 +238,19 @@ class RTDETRCriterion(nn.Module):
             torch.distributed.all_reduce(num_boxes)
         num_boxes = torch.clamp(num_boxes / get_world_size(), min=1).item()
         
-        # Retrieve the matching between the outputs of the last layer and the targets
-        indices = self.matcher(outputs_without_aux, targets)['indices']
+        # Retrieve the matching between the outputs of the last layer and the targets 预测（无辅助）和GT匹配
+        indices = self.matcher(outputs_without_aux, targets)['indices']     #([7,  22,  29],[0, 17, 28]) 表示预测7和真值0匹配...
 
         # Compute all the requested losses
         losses = {}
-        for loss in self.losses:
-            l_dict = self.get_loss(loss, outputs, targets, indices, num_boxes)
-            l_dict = {k: l_dict[k] * self.weight_dict[k] for k in l_dict if k in self.weight_dict}
-            losses.update(l_dict)
+        for loss in self.losses:    #['vf1','boxes'] + 'ar'
+            l_dict = self.get_loss(loss, outputs, targets, indices, num_boxes)  #这里用的全outputs
+            l_dict = {k: l_dict[k] * self.weight_dict[k] for k in l_dict if k in self.weight_dict}  #weight_dict={'loss_vfl': 1, 'loss_bbox': 5, 'loss_giou': 2}
+            losses.update(l_dict)   
 
-        # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
-        if 'aux_outputs' in outputs:
-            for i, aux_outputs in enumerate(outputs['aux_outputs']):
+        # In case of auxiliary losses, we repeat this process with the output of each intermediate layer. 辅助预测和GT匹配
+        if 'aux_outputs' in outputs:    
+            for i, aux_outputs in enumerate(outputs['aux_outputs']):#遍历6层
                 indices = self.matcher(aux_outputs, targets)['indices']
                 for loss in self.losses:
                     if loss == 'masks':
@@ -215,11 +265,11 @@ class RTDETRCriterion(nn.Module):
                     l_dict = {k: l_dict[k] * self.weight_dict[k] for k in l_dict if k in self.weight_dict}
                     l_dict = {k + f'_aux_{i}': v for k, v in l_dict.items()}
                     losses.update(l_dict)
-
+        #此时losses中有7部分，基本loss和aux0-5
         # In case of cdn auxiliary losses. For rtdetr
         if 'dn_aux_outputs' in outputs:
             assert 'dn_meta' in outputs, ''
-            indices = self.get_cdn_matched_indices(outputs['dn_meta'], targets)
+            indices = self.get_cdn_matched_indices(outputs['dn_meta'], targets) #这里不用匈牙利匹配
             dn_num_boxes = num_boxes * outputs['dn_meta']['dn_num_group']
             for i, aux_outputs in enumerate(outputs['dn_aux_outputs']):
                 for loss in self.losses:
@@ -231,7 +281,7 @@ class RTDETRCriterion(nn.Module):
                     l_dict = {k: l_dict[k] * self.weight_dict[k] for k in l_dict if k in self.weight_dict}
                     l_dict = {k + f'_dn_{i}': v for k, v in l_dict.items()}
                     losses.update(l_dict)
-
+        #此时losses中有13部分，基本loss\aux0-5\dn0-5
         return losses
 
     @staticmethod
@@ -280,3 +330,37 @@ def accuracy(output, target, topk=(1,)):
 
 
 
+
+#常规版（慢）
+def NWD2(pred, target, eps=1e-7, constant=20, img_size = (640, 512)):    #原作者用的绝对坐标，这里用了归一化坐标. C=12.8
+    h, w = img_size  # (640, 512)
+    
+    # Convert normalized coordinates and sizes to absolute values
+    pred_abs = pred.clone()
+    pred_abs[:, 0] *= w  # x_center (absolute)
+    pred_abs[:, 1] *= h  # y_center (absolute)
+    pred_abs[:, 2] *= w  # width (absolute)
+    pred_abs[:, 3] *= h  # height (absolute)
+    
+    target_abs = target.clone()
+    target_abs[:, 0] *= w  # x_center (absolute)
+    target_abs[:, 1] *= h  # y_center (absolute)
+    target_abs[:, 2] *= w  # width (absolute)
+    target_abs[:, 3] *= h  # height (absolute)
+    
+    center1 = pred_abs[:, :2]       #[cx,cy]
+    center2 = target_abs[:, :2]
+
+    whs = center1[:, :2] - center2[:, :2]
+
+    center_distance = whs[:, 0] * whs[:, 0] + whs[:, 1] * whs[:, 1] + eps #
+
+    w1 = pred_abs[:, 2]  + eps
+    h1 = pred_abs[:, 3]  + eps
+    w2 = target_abs[:, 2] + eps
+    h2 = target_abs[:, 3] + eps
+
+    wh_distance = ((w1 - w2) ** 2 + (h1 - h2) ** 2) / 4
+
+    wasserstein_2 = center_distance + wh_distance
+    return torch.exp(-torch.sqrt(wasserstein_2) / constant)

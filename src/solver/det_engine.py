@@ -30,8 +30,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     
     print_freq = kwargs.get('print_freq', 10)
     writer :SummaryWriter = kwargs.get('writer', None)
-
-    ema :ModelEMA = kwargs.get('ema', None)
+    #AMP和EMA都开了，虽然runtime中是false（？）
+    ema :ModelEMA = kwargs.get('ema', None)         #ema和scaler都有值
     scaler :GradScaler = kwargs.get('scaler', None)
     lr_warmup_scheduler :Warmup = kwargs.get('lr_warmup_scheduler', None)
 
@@ -48,7 +48,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             with torch.autocast(device_type=str(device), enabled=False):
                 loss_dict = criterion(outputs, targets, **metas)
 
-            loss = sum(loss_dict.values())
+            loss = sum(loss_dict.values())      #打印出来的都是乘过权重的
             scaler.scale(loss).backward()
             
             if max_norm > 0:
@@ -79,7 +79,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         if lr_warmup_scheduler is not None:
             lr_warmup_scheduler.step()
 
-        loss_dict_reduced = dist_utils.reduce_dict(loss_dict)
+        loss_dict_reduced = dist_utils.reduce_dict(loss_dict)       #每个GPU只能看自己的mini-batch，这一步是算每个GPU的均值
         loss_value = sum(loss_dict_reduced.values())
 
         if not math.isfinite(loss_value):

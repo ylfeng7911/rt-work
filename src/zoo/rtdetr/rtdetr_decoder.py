@@ -199,13 +199,10 @@ class TransformerDecoderLayer(nn.Module):
         #         attn_mask.to(torch.bool),
         #         torch.zeros_like(attn_mask),
         #         torch.full_like(attn_mask, float('-inf'), dtype=tgt.dtype))
-        assert not torch.isnan(tgt).any(), f"NaN detected in tgt1"
-        
-        
+
         tgt2, _ = self.self_attn(q, k, value=tgt, attn_mask=attn_mask)
         tgt = tgt + self.dropout1(tgt2)
         tgt = self.norm1(tgt)
-        assert not torch.isnan(tgt).any(), f"NaN detected in tgt2"
         # cross attention
         tgt2 = self.cross_attn(\
             self.with_pos_embed(tgt, query_pos_embed), 
@@ -215,29 +212,23 @@ class TransformerDecoderLayer(nn.Module):
             memory_mask)
         tgt = tgt + self.dropout2(tgt2)
         tgt = self.norm2(tgt)
-        assert not torch.isnan(tgt).any(), f"NaN detected in tgt3"
+
         # ffn
         tgt2 = self.forward_ffn(tgt)
         tgt = tgt + self.dropout4(tgt2)
-        tgt = self.norm3(tgt.clamp(min=-65504, max=65504))
+        tgt = self.norm3(tgt)
 
-        assert not torch.isnan(tgt).any(), f"NaN detected in tgt4"
-        
         return tgt
 
 
 class TransformerDecoder(nn.Module):    #参考点和偏移量全是预测得到的
-    def __init__(self, hidden_dim, decoder_layer, num_layers, eval_idx=-1, mask_dim = 256, num_heads=8):
+    def __init__(self, hidden_dim, decoder_layer, num_layers, eval_idx=-1):
         super(TransformerDecoder, self).__init__()
         self.layers = nn.ModuleList([copy.deepcopy(decoder_layer) for _ in range(num_layers)])
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
         self.eval_idx = eval_idx if eval_idx >= 0 else num_layers + eval_idx
-        self.boltzmann_sampling: dict = {"mask_threshold": 0.5, "do_boltzmann": True, "sample_ratio": 0.1, "base_temp": 1,}
-        self.decoder_norm = nn.LayerNorm(hidden_dim, eps=1e-4)
-        self.mask_embed = MLP(hidden_dim, hidden_dim, mask_dim, 3)  
-        self.num_heads = num_heads
-        self.mask_factor = -10
+
 
     def forward(self,
                 tgt,                #合并后的[b,500,256]        在解码器中一直是 嵌入 的身份
@@ -258,10 +249,6 @@ class TransformerDecoder(nn.Module):    #参考点和偏移量全是预测得到
         for i, layer in enumerate(self.layers):
             ref_points_input = ref_points_detach.unsqueeze(2)       #[b,500,1,4] 这个是输入参考点（DDETR中是位置query直接预测的），不同于迭代更新的参考点（相当于query的位置编码，或者叫位置query）。在DDETR中前者是后者预测的
             query_pos_embed = query_pos_head(ref_points_detach)     #[b,500,4] -> [b,500,256]表示query的位置嵌入,
-            if attn_mask is not None:
-                attn_mask_bol = self.boltzmann(tgt + query_pos_embed, layer_id= i)
-                attn_mask = attn_mask * attn_mask_bol * self.mask_factor    #逻辑与 可加性掩码系数
-                attn_mask = attn_mask.clamp(min=-100, max=0)
             output = layer(output, ref_points_input, memory,        #解码器层  [b,500,256]
                            memory_spatial_shapes, memory_level_start_index,
                            attn_mask, memory_mask, query_pos_embed)
@@ -288,44 +275,6 @@ class TransformerDecoder(nn.Module):    #参考点和偏移量全是预测得到
         return torch.stack(dec_out_bboxes), torch.stack(dec_out_logits)
     #[6,b,500,4]  [6,b,500,2]
     
-    def boltzmann(self, tgt_mask, layer_id=-1): #根据输入嵌入 生成注意力掩码
-        # Boltzman sampling on attention mask
-        threshold = self.boltzmann_sampling["mask_threshold"]  # original threshold for masked attention
-        do_boltzmann = self.boltzmann_sampling["do_boltzmann"]  # whether to do Boltzman sampling
-        sample_ratio = self.boltzmann_sampling["sample_ratio"]  # number of iid samples as a ratio of total number of masked tokens
-        base_temp = self.boltzmann_sampling["base_temp"]  # base temperature for Boltzman sampling
-              
-        decoder_output = self.decoder_norm(tgt_mask)      #[b,nq,c]
-        mask_embed = self.mask_embed(decoder_output)        #[b,nq,c]
-        attn = torch.matmul(mask_embed, mask_embed.transpose(-1, -2)) / (mask_embed.shape[-1] ** 0.5)  #自交互 [b,nq,nq]
-        
-        attn = (
-            attn.sigmoid() #归一化
-            .unsqueeze(1)
-            .repeat(1, self.num_heads, 1, 1)
-            .flatten(0, 1)
-        )       #[b, nq, nq] -> [b * n_head, nq, nq]          .detach()   
-
-        if do_boltzmann:
-            # probability of Boltzman sampling
-            Temp = base_temp / (2 + layer_id)  #2  temperature decays with layer number (first layer from id -1)
-            boltzmann_prob = torch.exp(attn / Temp)
-            boltzmann_prob = (boltzmann_prob * (attn < threshold).float())  # 大于阈值不掩，小于阈值概率掩
-
-            boltzmann_prob = boltzmann_prob / (boltzmann_prob.sum(dim=-1, keepdim=True) + 1e-6)
-            
-            assert not torch.isnan(boltzmann_prob).any(), f"NaN detected in attn_mask in layer {layer_id} in 1"
-            
-            # sample from Boltzman distribution n times
-            n_samples = int(attn.shape[-1] * sample_ratio)  # number of iid samples on the tokens    HW/10
-            masked_prob = (1 - boltzmann_prob) ** n_samples  # 对于小于阈值的部分来说，masked_prob就是最后的值
-                       
-            rand_tensor = torch.rand_like(boltzmann_prob)
-            boltzmann_mask = 1.0 - torch.sigmoid((rand_tensor - masked_prob) * 100)
-            attn_mask = (1.0 - torch.sigmoid((attn - threshold) * 100)) * boltzmann_mask  # 近似 and 操作（可导）
-        else:
-            attn_mask = (attn_mask < threshold).bool()
-        return  attn_mask
 
 
 @register()

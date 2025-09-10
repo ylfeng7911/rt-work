@@ -88,3 +88,41 @@ def masks_to_boxes(masks):
     y_min = y_mask.masked_fill(~(masks.bool()), 1e8).flatten(1).min(-1)[0]
 
     return torch.stack([x_min, y_min, x_max, y_max], 1)
+
+
+
+  # NWD
+def NWD(pred, target, eps=1e-7, constant=20, img_size=(640, 512)):#快速版实现
+    """
+    Optimized NWD calculation with absolute coordinates.
+    NWD计算时用的绝对坐标，如果不然，wasserstein_2算出来全趋近于0，最后取指数得到的全是1
+    Args:
+        pred (Tensor): Predicted boxes in normalized [x_center, y_center, width, height] format.
+        target (Tensor): Target boxes in normalized [x_center, y_center, width, height] format.
+        eps (float): Small value for numerical stability.
+        constant (float): Scaling factor (originally 12.8, typically set to 5-10).
+        img_size (tuple): Image (height, width) for normalization.
+    
+    Returns:
+        Tensor: NWD scores (higher means more similar).
+    """
+    h, w = img_size
+    
+    # Vectorized absolute coordinate conversion
+    scale = torch.tensor([w, h, w, h], device=pred.device, dtype=pred.dtype)
+    pred_abs = pred * scale
+    target_abs = target * scale
+    
+    # Center distance (squared L2)
+    center_diff = pred_abs[:, :2] - target_abs[:, :2]
+    center_distance = (center_diff ** 2).sum(dim=1) + eps
+    
+    # Width-height distance
+    wh_diff = pred_abs[:, 2:] - target_abs[:, 2:]
+    wh_distance = (wh_diff ** 2).sum(dim=1) / 4 + eps
+    
+    # Combined Wasserstein distance
+    wasserstein_2 = center_distance + wh_distance
+    
+    # NWD = exp(-sqrt(wasserstein_2)/constant)
+    return torch.exp(-torch.sqrt(wasserstein_2) / constant)
