@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
 from typing import Dict 
 
-from .box_ops import box_cxcywh_to_xyxy, generalized_box_iou
+from .box_ops import box_cxcywh_to_xyxy, generalized_box_iou, NWD_cost
 
 from ...core import register
 
@@ -40,6 +40,7 @@ class HungarianMatcher(nn.Module):
         self.cost_class = weight_dict['cost_class'] #2
         self.cost_bbox = weight_dict['cost_bbox']   #5
         self.cost_giou = weight_dict['cost_giou']   #2
+        self.cost_NWD = weight_dict['cost_NWD']
 
         self.use_focal_loss = use_focal_loss
         self.alpha = alpha  #0.25
@@ -99,8 +100,11 @@ class HungarianMatcher(nn.Module):
         # Compute the giou cost betwen boxes
         cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_bbox), box_cxcywh_to_xyxy(tgt_bbox))
         
+        cost_NWD = 0
+        # cost_NWD = -NWD_cost(out_bbox,tgt_bbox)
+        
         # Final cost matrix 总代价矩阵
-        C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
+        C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou + self.cost_NWD * cost_NWD
         C = C.view(bs, num_queries, -1).cpu()
 
         sizes = [len(v["boxes"]) for v in targets]

@@ -130,7 +130,7 @@ class RTDETRCriterion(nn.Module):
         card_err = F.l1_loss(card_pred.float(), tgt_lengths.float())
         losses = {'cardinality_error': card_err}
         return losses
-    #回归损失，分为L1和GIOU + AR
+    #回归损失，分为L1和GIOU 
     def loss_boxes(self, outputs, targets, indices, num_boxes):
         """Compute the losses related to the bounding boxes, the L1 regression loss and the GIoU loss
            targets dicts must contain the key "boxes" containing a tensor of dim [nb_target_boxes, 4]
@@ -142,9 +142,9 @@ class RTDETRCriterion(nn.Module):
         target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0) #shape=[145,4] 真实框
 
         losses = {}
-
-        loss_bbox = F.l1_loss(src_boxes, target_boxes, reduction='none')
-        losses['loss_bbox'] = loss_bbox.sum() / num_boxes
+        #L1损失并不在[0,1]内，而是[0,4]
+        loss_bbox = F.l1_loss(src_boxes, target_boxes, reduction='none')    #逐元素绝对差
+        losses['loss_bbox'] = loss_bbox.sum() / num_boxes       #求每个框的平均误差
 
         loss_giou = 1 - torch.diag(generalized_box_iou(\
             box_cxcywh_to_xyxy(src_boxes), box_cxcywh_to_xyxy(target_boxes)))

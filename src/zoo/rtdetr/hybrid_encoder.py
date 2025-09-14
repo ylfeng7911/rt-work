@@ -15,6 +15,127 @@ from ...core import register
 
 __all__ = ['HybridEncoder']
 
+class ChannelAttention(nn.Module):
+    """
+    通道注意力
+    """
+
+    def __init__(self, in_channels, ratio=16):
+        super(ChannelAttention, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+
+        self.fc = nn.Sequential(
+            # 全连接层
+            # nn.Linear(in_planes, in_planes // ratio, bias=False),
+            # nn.ReLU(), 
+            # nn.Linear(in_planes // ratio, in_planes, bias=False)
+
+            # 利用1x1卷积代替全连接，避免输入必须尺度固定的问题，并减小计算量
+            nn.Conv2d(in_channels, in_channels // ratio, 1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels // ratio, in_channels, 1, bias=False)
+        )
+
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+       avg_out = self.fc(self.avg_pool(x))      #[b,c,1,1] 
+       max_out = self.fc(self.max_pool(x))      #[b,c,1,1] 
+       out = avg_out + max_out
+       out = self.sigmoid(out)                  #[b,c,1,1]每个通道的权重
+       return out * x                           #每个通道按权重缩放[b,c,h,w]
+
+
+class SpatialAttention(nn.Module):
+    """
+    空间注意力
+    """
+
+    def __init__(self, kernel_size=7):
+        super(SpatialAttention, self).__init__()
+
+        assert kernel_size in (3, 7), 'kernel size must be 3 or 7'
+        padding = 3 if kernel_size == 7 else 1
+        self.conv1 = nn.Conv2d(2, 1, kernel_size, padding=padding, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        avg_out = torch.mean(x, dim=1, keepdim=True)            #[b,1,h,w]
+        max_out, _ = torch.max(x, dim=1, keepdim=True)          #[b,1,h,w]
+        out = torch.cat([avg_out, max_out], dim=1)              #[b,2,h,w]
+        out = self.sigmoid(self.conv1(out))                     #[b,1,h,w]
+        return out * x                          #每个空间位置缩放[b,c,h,w]
+
+
+class CBAM(nn.Module):
+    """
+    CBAM混合注意力机制.作用：让模型知道特征图的哪些通道、区域是 重要/不重要，从而放大/缩小。
+    """
+
+    def __init__(self, in_channels, ratio=16, kernel_size=3):
+        super(CBAM, self).__init__()
+        self.channelattention = ChannelAttention(in_channels, ratio=ratio)
+        self.spatialattention = SpatialAttention(kernel_size=kernel_size)
+
+    def forward(self, x):
+        x = self.channelattention(x)
+        x = self.spatialattention(x)
+        return x
+
+
+class SKConv(nn.Module):
+    def __init__(self, features=64, M=3, G=8, r=2, stride=1 ,L=32):
+        """ Constructor
+        Args:
+            features: input channel dimensionality.
+            WH: input spatial dimensionality, used for GAP kernel size.
+            M: the number of branchs.
+            G: num of convolution groups.
+            r: the radio for compute d, the length of z.
+            stride: stride, default 1.
+            L: the minimum dim of the vector z in paper, default 32.
+        """
+        super(SKConv, self).__init__()
+        d = max(int(features/r), L)
+        self.M = M
+        self.features = features
+        self.convs = nn.ModuleList([])
+        for i in range(M):
+            self.convs.append(nn.Sequential(
+                nn.Conv2d(features, features, kernel_size=3+i*2, stride=stride, padding=1+i, groups=G),
+                nn.BatchNorm2d(features),
+                nn.ReLU()
+            ))
+        self.fc = nn.Linear(features, d)
+        self.fcs = nn.ModuleList([])
+        for i in range(M):
+            self.fcs.append(
+                nn.Linear(d, features)
+            )
+        self.softmax = nn.Softmax(dim=1)
+        
+    def forward(self, x):
+        for i, conv in enumerate(self.convs):
+            fea = conv(x).unsqueeze(dim=1)
+            if i == 0:
+                feas = fea
+            else:
+                feas = torch.cat([feas, fea], dim=1)    #[b,3,c,h,w]
+        fea_U = torch.sum(feas, dim=1)          #对x多次卷积，结果相加 [b,c,h,w]
+        fea_s = fea_U.mean(-1).mean(-1)         #空间维度求平均 [b,c]
+        fea_z = self.fc(fea_s)                  #线性层[b,d]
+        for i, fc in enumerate(self.fcs):
+            vector = fc(fea_z).unsqueeze(dim=1)        #[b,1,c]
+            if i == 0:
+                attention_vectors = vector
+            else:
+                attention_vectors = torch.cat([attention_vectors, vector], dim=1)   #[b,3,c]
+        attention_vectors = self.softmax(attention_vectors)   #  每个[b,c]都生成一个3维度权重    [b,3,c]
+        attention_vectors = attention_vectors.unsqueeze(-1).unsqueeze(-1)       #[b,3,c,1,1]
+        fea_v = (feas * attention_vectors).sum(dim=1)   #把卷积结果按权重求和
+        return fea_v
+    
 
 class ConvNormLayer(nn.Module):
     def __init__(self, ch_in, ch_out, kernel_size, stride, padding=None, bias=False, act=None,groups=1):

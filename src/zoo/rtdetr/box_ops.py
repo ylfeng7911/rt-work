@@ -102,7 +102,7 @@ def NWD(pred, target, eps=1e-7, constant=20, img_size=(640, 512)):#快速版实�
         eps (float): Small value for numerical stability.
         constant (float): Scaling factor (originally 12.8, typically set to 5-10).
         img_size (tuple): Image (height, width) for normalization.
-    
+        基于 (dcx)^2 + (dcy)^2 + (dw)^2 + (dh)^2 
     Returns:
         Tensor: NWD scores (higher means more similar).
     """
@@ -126,3 +126,38 @@ def NWD(pred, target, eps=1e-7, constant=20, img_size=(640, 512)):#快速版实�
     
     # NWD = exp(-sqrt(wasserstein_2)/constant)
     return torch.exp(-torch.sqrt(wasserstein_2) / constant)
+
+
+def NWD_cost(pred, target, eps=1e-7, constant=20, img_size=(640, 512)):
+    """
+    Compute pairwise NWD between all predicted and target boxes.
+    
+    Args:
+        pred (Tensor): Predicted boxes [num_pred, 4] (normalized cxcywh format).
+        target (Tensor): Target boxes [num_target, 4] (normalized cxcywh format).
+        eps (float): Small value for numerical stability.
+        constant (float): Scaling factor (typically 5-10).
+        img_size (tuple): Image (height, width) for denormalization.
+    
+    Returns:
+        Tensor: NWD matrix [num_pred, num_target], where higher values indicate more similarity.
+    """
+    h, w = img_size
+    # Convert to absolute coordinates [num_pred, 4] and [num_target, 4]
+    scale = torch.tensor([w, h, w, h], device=pred.device, dtype=pred.dtype)
+    pred_abs = pred * scale  # [num_pred, 4]
+    target_abs = target * scale  # [num_target, 4]
+    
+    # Compute center distances [num_pred, num_target]
+    center_diff = pred_abs[:, None, :2] - target_abs[None, :, :2]  # Broadcasting
+    center_distance = (center_diff ** 2).sum(dim=-1) + eps  # [num_pred, num_target]
+    
+    # Compute width-height distances [num_pred, num_target]
+    wh_diff = pred_abs[:, None, 2:] - target_abs[None, :, 2:]  # Broadcasting
+    wh_distance = (wh_diff ** 2).sum(dim=-1) / 4 + eps  # [num_pred, num_target]
+    
+    # Combined Wasserstein distance
+    wasserstein_2 = center_distance + wh_distance  # [num_pred, num_target]
+    
+    # NWD = exp(-sqrt(wasserstein_2)/constant)
+    return torch.exp(-torch.sqrt(wasserstein_2) / constant)  # [num_pred, num_target]
