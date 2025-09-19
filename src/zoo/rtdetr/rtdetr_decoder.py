@@ -13,7 +13,7 @@ import torch.nn.init as init
 from .denoising import get_contrastive_denoising_training_group
 from .utils import deformable_attention_core_func, get_activation, inverse_sigmoid
 from .utils import bias_init_with_prob
-
+from .group_attention import grouped_self_attn
 
 from ...core import register
 
@@ -184,7 +184,7 @@ class TransformerDecoderLayer(nn.Module):
         return self.linear2(self.dropout3(self.activation(self.linear1(tgt))))
 
     def forward(self,
-                tgt,            #[b,500,2]
+                tgt,            #[b,500,c]
                 reference_points,   #[b,500,1,4]
                 memory,     #[b,sum_hw,c]
                 memory_spatial_shapes,
@@ -220,15 +220,34 @@ class TransformerDecoderLayer(nn.Module):
 
         return tgt
 
+ 
+class GroupSelfAttention(nn.Module):
+    def __init__(self, hidden_dim=256, nhead=8, dropout=0.0):
+        super().__init__()
+        self.self_attn = nn.MultiheadAttention(hidden_dim, nhead, dropout=dropout, batch_first=True)
+        self.norm = nn.LayerNorm(hidden_dim)
+
+    def forward(self, x, attn_mask):
+        # x: [B, N, C]
+        attn_out, _ = self.self_attn(x, x, x, key_padding_mask=attn_mask)   #注意key_padding_mask和attn_mask的区别
+        x = self.norm(x + attn_out)
+        return x
 
 class TransformerDecoder(nn.Module):    #参考点和偏移量全是预测得到的
-    def __init__(self, hidden_dim, decoder_layer, num_layers, eval_idx=-1):
+    def __init__(self, hidden_dim, decoder_layer, num_layers, eval_idx=-1, num_queries=300, topk_ratio=0.5):
         super(TransformerDecoder, self).__init__()
         self.layers = nn.ModuleList([copy.deepcopy(decoder_layer) for _ in range(num_layers)])
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
         self.eval_idx = eval_idx if eval_idx >= 0 else num_layers + eval_idx
+        # self.prototype_embed = nn.Parameter(torch.randn(1, 1, hidden_dim))
 
+        #额外引入 group self-attention
+        self.group_attn = GroupSelfAttention(hidden_dim, nhead=8)
+        self.num_queries = num_queries
+        self.topk_ratio = topk_ratio  # 比例，例如 0.3 表示 top 90 个为前景
+        # 一个临时分类头，用来做粗分
+        self.temp_cls_head = nn.Linear(hidden_dim, 1)  # 二分类：前景/背景
 
     def forward(self,
                 tgt,                #合并后的[b,500,256]        在解码器中一直是 嵌入 的身份
@@ -246,12 +265,19 @@ class TransformerDecoder(nn.Module):    #参考点和偏移量全是预测得到
         dec_out_logits = []
         ref_points_detach = F.sigmoid(ref_points_unact)
         
+        # B, N, C = tgt.shape
+        # proto = self.prototype_embed.expand(B, N, -1)  # [B, num_queries, C]
+        # output = tgt + proto
+        
         for i, layer in enumerate(self.layers):
             ref_points_input = ref_points_detach.unsqueeze(2)       #[b,500,1,4] 这个是输入参考点（DDETR中是位置query直接预测的），不同于迭代更新的参考点（相当于query的位置编码，或者叫位置query）。在DDETR中前者是后者预测的
             query_pos_embed = query_pos_head(ref_points_detach)     #[b,500,4] -> [b,500,256]表示query的位置嵌入,
+            
+            output = grouped_self_attn(output, self.temp_cls_head, self.group_attn, self.num_queries)
+            
             output = layer(output, ref_points_input, memory,        #解码器层  [b,500,256]
                            memory_spatial_shapes, memory_level_start_index,
-                           attn_mask, memory_mask, query_pos_embed)
+                           attn_mask, memory_mask, query_pos_embed,)
 
             inter_ref_bbox = F.sigmoid(bbox_head[i](output) + inverse_sigmoid(ref_points_detach))   #bbox预测结果漂移量+参考点 [b,500,4]
 
@@ -377,8 +403,8 @@ class RTDETRTransformer(nn.Module):
         self._reset_parameters()
 
     def _reset_parameters(self):
-        bias = bias_init_with_prob(0.01)
-
+        bias = bias_init_with_prob(0.05)        #0.01
+        init.constant_(self.decoder.temp_cls_head.bias, bias)
         init.constant_(self.enc_score_head.bias, bias)
         init.constant_(self.enc_bbox_head.layers[-1].weight, 0)
         init.constant_(self.enc_bbox_head.layers[-1].bias, 0)

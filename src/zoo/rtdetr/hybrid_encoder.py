@@ -34,7 +34,9 @@ class ChannelAttention(nn.Module):
             # 利用1x1卷积代替全连接，避免输入必须尺度固定的问题，并减小计算量
             nn.Conv2d(in_channels, in_channels // ratio, 1, bias=False),
             nn.ReLU(inplace=True),
-            nn.Conv2d(in_channels // ratio, in_channels, 1, bias=False)
+            nn.Dropout(p=0.1),                                              #添加正则化
+            nn.Conv2d(in_channels // ratio, in_channels, 1, bias=False),
+            nn.BatchNorm2d(in_channels),                             #添加正则化
         )
 
         self.sigmoid = nn.Sigmoid()
@@ -52,19 +54,26 @@ class SpatialAttention(nn.Module):
     空间注意力
     """
 
-    def __init__(self, kernel_size=7):
+    def __init__(self, kernel_size=7, dropout=0.1):
         super(SpatialAttention, self).__init__()
 
         assert kernel_size in (3, 7), 'kernel size must be 3 or 7'
         padding = 3 if kernel_size == 7 else 1
         self.conv1 = nn.Conv2d(2, 1, kernel_size, padding=padding, bias=False)
+        #添加正则化
+        self.norm = nn.BatchNorm2d(1)  # 对每个通道/位置的值做归一化
+        self.dropout = nn.Dropout(p=dropout)
+        
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
         avg_out = torch.mean(x, dim=1, keepdim=True)            #[b,1,h,w]
         max_out, _ = torch.max(x, dim=1, keepdim=True)          #[b,1,h,w]
         out = torch.cat([avg_out, max_out], dim=1)              #[b,2,h,w]
-        out = self.sigmoid(self.conv1(out))                     #[b,1,h,w]
+        out = self.conv1(out)
+        out = self.norm(out)
+        out = self.sigmoid(out)                     #[b,1,h,w]
+        out = self.dropout(out)  
         return out * x                          #每个空间位置缩放[b,c,h,w]
 
 
@@ -73,15 +82,16 @@ class CBAM(nn.Module):
     CBAM混合注意力机制.作用：让模型知道特征图的哪些通道、区域是 重要/不重要，从而放大/缩小。
     """
 
-    def __init__(self, in_channels, ratio=16, kernel_size=3):
+    def __init__(self, in_channels, ratio=16, kernel_size=3, dropout=0.05):
         super(CBAM, self).__init__()
         self.channelattention = ChannelAttention(in_channels, ratio=ratio)
         self.spatialattention = SpatialAttention(kernel_size=kernel_size)
-
+        self.dropout = nn.Dropout(p=dropout)        #添加正则化
+          
     def forward(self, x):
         x = self.channelattention(x)
         x = self.spatialattention(x)
-        return x
+        return self.dropout(x)
 
 
 class SKConv(nn.Module):
@@ -470,7 +480,8 @@ class HybridEncoder(nn.Module):
                 CSPRepLayer(hidden_dim * 2, hidden_dim, round(3 * depth_mult), act=act, expansion=expansion)        #C减半,H/W不变
             )
             
-        #ASFF
+        #CBAM,ASFF
+        self.CBAM_block = nn.ModuleList([CBAM(256) for i,ch in enumerate(in_channels)])
         self.ASFF_block = nn.ModuleList([ASFF(i) for i,ch in enumerate(in_channels)])
         self._reset_parameters()
 
@@ -542,7 +553,8 @@ class HybridEncoder(nn.Module):
             out = self.pan_blocks[idx](torch.concat([downsample_feat, feat_height], dim=1)) #concat再减半C
             outs.append(out)
 
-        final_outs = [self.ASFF_block[i](outs[3], outs[2], outs[1], outs[0]) for i in range(len(self.in_channels))] #尺度从小到大
-        final_outs.reverse()
+        CBAM_outs = [self.CBAM_block[i](outs[i]) for i in range(len(self.in_channels))]  #（尺度从下往上) 
+        ASFF_outs = [self.ASFF_block[i](CBAM_outs[3], CBAM_outs[2], CBAM_outs[1], CBAM_outs[0]) for i in range(len(self.in_channels))] #尺度从小到大
+        ASFF_outs.reverse()
 
-        return final_outs
+        return ASFF_outs            #尺度从大到小

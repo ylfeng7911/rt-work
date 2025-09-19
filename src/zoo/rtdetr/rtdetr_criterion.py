@@ -152,21 +152,15 @@ class RTDETRCriterion(nn.Module):
         return losses
 
     #宽高比AR损失
-    def loss_ar(self, outputs, targets, indices, num_boxes, lambda_sup=1.0, lambda_cons=0.05):
+    def loss_ar(self, outputs, targets, indices, num_boxes, lambda_cons=0.05):
         """ Aspect Ratio (AR) loss: supervised + consistency """ #监督+一致性
         assert 'pred_boxes' in outputs
         idx = self._get_src_permutation_idx(indices)        #(batch_idx, tgt_idx)
 
         # 取匹配到的预测框和GT框
         src_boxes = outputs['pred_boxes'][idx]   # [N, 4], cx, cy, w, h
-        target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0) # [N, 4]
-
-        # --- 1) Supervised AR loss ---
-        # src_ar = (src_boxes[:, 2] / (src_boxes[:, 3] + 1e-6))   # w/h
-        # tgt_ar = (target_boxes[:, 2] / (target_boxes[:, 3] + 1e-6))
-        # loss_ar_sup = torch.abs(src_ar - tgt_ar).sum() / num_boxes
-
-        # --- 2) Consistency AR loss (图像级方差约束) ---
+        
+        # Consistency AR loss (图像级方差约束) ---
         # 按 batch 拆分：indices 里存了每张图匹配的预测id
         loss_ar_cons_list = []          #计算每张图中AR的方差（AR是个统计量，这里用方差衡量偏移程度）
         for (src_idx, _) in indices:
@@ -177,8 +171,6 @@ class RTDETRCriterion(nn.Module):
                 loss_ar_cons_list.append(((ar_vals - mean_ar) ** 2).mean())
         loss_ar_cons = torch.stack(loss_ar_cons_list).mean() if loss_ar_cons_list else torch.tensor(0., device=src_boxes.device)
 
-        # --- 3) 总 loss ---
-        # loss = lambda_sup * loss_ar_sup + lambda_cons * loss_ar_cons
         loss = lambda_cons * loss_ar_cons
         return {"loss_ar": loss}
 

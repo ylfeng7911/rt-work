@@ -20,7 +20,7 @@ def get_contrastive_denoising_training_group(targets,
     if num_denoising <= 0:
         return None, None, None, None
 
-    num_gts = [len(t['labels']) for t in targets]   #一个batch中标签数量
+    num_gts = [len(t['labels']) for t in targets]   #每个batch中目标数量
     device = targets[0]['labels'].device
     
     max_gt_num = max(num_gts)   #最大标签数量
@@ -63,17 +63,17 @@ def get_contrastive_denoising_training_group(targets,
     if label_noise_ratio > 0:
         mask = torch.rand_like(input_query_class, dtype=torch.float) < (label_noise_ratio * 0.5)    #随机掩码
         # randomly put a new one here
-        new_label = torch.randint_like(mask, 0, num_classes, dtype=input_query_class.dtype) #0或1
-        input_query_class = torch.where(mask & pad_gt_mask, new_label, input_query_class)   #随机选新（随机标签）/真实标签
+        new_label = torch.randint_like(mask, 0, num_classes, dtype=input_query_class.dtype) #0或1的掩码矩阵
+        input_query_class = torch.where(mask & pad_gt_mask, new_label, input_query_class)   #真实标签的每个位置：若满足条件，则改为随机标签
 
     #生成bbox噪声
     if box_noise_scale > 0:
         known_bbox = box_cxcywh_to_xyxy(input_query_bbox)       #[2,200,4]
-        diff = torch.tile(input_query_bbox[..., 2:] * 0.5, [1, 1, 2]) * box_noise_scale #缩放程度 [2,200,4]
+        diff = torch.tile(input_query_bbox[..., 2:] * 0.5, [1, 1, 2]) * box_noise_scale #根据wh加噪，缩放程度 [2,200,4]
         rand_sign = torch.randint_like(input_query_bbox, 0, 2) * 2.0 - 1.0  #随机正负，代表偏移方向
         rand_part = torch.rand_like(input_query_bbox)   #随机小数
         rand_part = (rand_part + 1.0) * negative_gt_mask + rand_part * (1 - negative_gt_mask)   #正负掩码加权
-        known_bbox += (rand_sign * rand_part * diff)        #加噪
+        known_bbox += (rand_sign * rand_part * diff)        #加噪（随机方向、幅度、噪声）
         known_bbox = torch.clip(known_bbox, min=0.0, max=1.0)
         input_query_bbox = box_xyxy_to_cxcywh(known_bbox)
         input_query_bbox_unact = inverse_sigmoid(input_query_bbox)          #查询向量是unact的
