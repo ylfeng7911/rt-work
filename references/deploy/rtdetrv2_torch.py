@@ -69,7 +69,7 @@ def main(args, ):
     ])
     im_data = transforms(im_pil)[None].to(args.device)
 
-    output = model(im_data, orig_size)
+    output= model(im_data, orig_size)
     labels, boxes, scores = output
 
     draw([im_pil], labels, boxes, scores)

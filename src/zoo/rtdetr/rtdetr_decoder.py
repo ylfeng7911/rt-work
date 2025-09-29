@@ -13,7 +13,7 @@ import torch.nn.init as init
 from .denoising import get_contrastive_denoising_training_group
 from .utils import deformable_attention_core_func, get_activation, inverse_sigmoid
 from .utils import bias_init_with_prob
-from .group_attention import grouped_self_attn
+from .group_attention import grouped_self_attn,grouped_self_conv,Conv1dGroupMixer,GatedResidualBlock1d,GNNMixer
 
 from ...core import register
 
@@ -227,11 +227,12 @@ class GroupSelfAttention(nn.Module):
         self.self_attn = nn.MultiheadAttention(hidden_dim, nhead, dropout=dropout, batch_first=True)
         self.norm = nn.LayerNorm(hidden_dim)
 
-    def forward(self, x, attn_mask):
+    def forward(self, x, key_padding_mask):
         # x: [B, N, C]
-        attn_out, _ = self.self_attn(x, x, x, key_padding_mask=attn_mask)   #注意key_padding_mask和attn_mask的区别
+        attn_out, _ = self.self_attn(x, x, x, key_padding_mask=key_padding_mask)   #注意key_padding_mask和attn_mask的区别
         x = self.norm(x + attn_out)
         return x
+
 
 class TransformerDecoder(nn.Module):    #参考点和偏移量全是预测得到的
     def __init__(self, hidden_dim, decoder_layer, num_layers, eval_idx=-1, num_queries=300, topk_ratio=0.5):
@@ -243,11 +244,14 @@ class TransformerDecoder(nn.Module):    #参考点和偏移量全是预测得到
         # self.prototype_embed = nn.Parameter(torch.randn(1, 1, hidden_dim))
 
         #额外引入 group self-attention
-        self.group_attn = GroupSelfAttention(hidden_dim, nhead=8)
+        # self.group_attn = GroupSelfAttention(hidden_dim, nhead=8)
         self.num_queries = num_queries
         self.topk_ratio = topk_ratio  # 比例，例如 0.3 表示 top 90 个为前景
         # 一个临时分类头，用来做粗分
-        self.temp_cls_head = nn.Linear(hidden_dim, 1)  # 二分类：前景/背景
+        # self.temp_cls_head = nn.Linear(hidden_dim, 1)  # 二分类：前景/背景
+        self.conv_mixer = GatedResidualBlock1d(dim=256)
+        # self.conv_mixer = GNNMixer(dim=256)
+
 
     def forward(self,
                 tgt,                #合并后的[b,500,256]        在解码器中一直是 嵌入 的身份
@@ -258,6 +262,7 @@ class TransformerDecoder(nn.Module):    #参考点和偏移量全是预测得到
                 bbox_head,
                 score_head,
                 query_pos_head,
+                enc_topk_logits,
                 attn_mask=None,
                 memory_mask=None):  #无
         output = tgt
@@ -273,7 +278,8 @@ class TransformerDecoder(nn.Module):    #参考点和偏移量全是预测得到
             ref_points_input = ref_points_detach.unsqueeze(2)       #[b,500,1,4] 这个是输入参考点（DDETR中是位置query直接预测的），不同于迭代更新的参考点（相当于query的位置编码，或者叫位置query）。在DDETR中前者是后者预测的
             query_pos_embed = query_pos_head(ref_points_detach)     #[b,500,4] -> [b,500,256]表示query的位置嵌入,
             
-            output = grouped_self_attn(output, self.temp_cls_head, self.group_attn, self.num_queries)
+            group_logits = score_head[i](output)
+            output = grouped_self_conv(output, query_pos_embed, group_logits, self.conv_mixer, self.num_queries)
             
             output = layer(output, ref_points_input, memory,        #解码器层  [b,500,256]
                            memory_spatial_shapes, memory_level_start_index,
@@ -403,8 +409,7 @@ class RTDETRTransformer(nn.Module):
         self._reset_parameters()
 
     def _reset_parameters(self):
-        bias = bias_init_with_prob(0.05)        #0.01
-        init.constant_(self.decoder.temp_cls_head.bias, bias)
+        bias = bias_init_with_prob(0.03)        #0.01
         init.constant_(self.enc_score_head.bias, bias)
         init.constant_(self.enc_bbox_head.layers[-1].weight, 0)
         init.constant_(self.enc_bbox_head.layers[-1].bias, 0)
@@ -583,6 +588,7 @@ class RTDETRTransformer(nn.Module):
             self.dec_bbox_head,     #bbox预测 MLP
             self.dec_score_head,    #类别预测 线性层
             self.query_pos_head,    #MLP
+            enc_topk_logits,
             attn_mask=attn_mask)
 
         if self.training and dn_meta is not None:
@@ -599,7 +605,8 @@ class RTDETRTransformer(nn.Module):
                 out['dn_aux_outputs'] = self._set_aux_loss(dn_out_logits, dn_out_bboxes)    ##  out['dn_aux_outputs'][0]  - [5]
                 out['dn_meta'] = dn_meta
 
-        return out
+        return out 
+        # return out,{"logits":enc_topk_logits, "bboxes":enc_topk_bboxes}
 
 
     @torch.jit.unused
@@ -608,4 +615,4 @@ class RTDETRTransformer(nn.Module):
         # doesn't support dictionary with non-homogeneous values, such
         # as a dict having both a Tensor and a list.
         return [{'pred_logits': a, 'pred_boxes': b}
-                for a, b in zip(outputs_class, outputs_coord)]
+                for a, b in zip(outputs_class, outputs_coord)]      #把两个tensor拼成2元素字典

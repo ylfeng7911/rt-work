@@ -36,7 +36,7 @@ class ChannelAttention(nn.Module):
             nn.ReLU(inplace=True),
             nn.Dropout(p=0.1),                                              #添加正则化
             nn.Conv2d(in_channels // ratio, in_channels, 1, bias=False),
-            nn.BatchNorm2d(in_channels),                             #添加正则化
+            # nn.BatchNorm2d(in_channels),
         )
 
         self.sigmoid = nn.Sigmoid()
@@ -558,3 +558,4 @@ class HybridEncoder(nn.Module):
         ASFF_outs.reverse()
 
         return ASFF_outs            #尺度从大到小
+        # return outs
