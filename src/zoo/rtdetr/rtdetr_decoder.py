@@ -37,6 +37,64 @@ class MLP(nn.Module):
 
 
 
+class GroupSelfAttention(nn.Module):
+    def __init__(self, hidden_dim=256, nhead=8, dropout=0.0):
+        super().__init__()
+        self.self_attn = nn.MultiheadAttention(hidden_dim, nhead, dropout=dropout, batch_first=True)
+        self.norm = nn.LayerNorm(hidden_dim)
+
+    def forward(self, x, key_padding_mask):
+        # x: [B, N, C]
+        attn_out, _ = self.self_attn(x, x, x, key_padding_mask=key_padding_mask)   #注意key_padding_mask和attn_mask的区别
+        x = self.norm(x + attn_out)
+        return x
+
+
+# class SKtgt(nn.Module):
+#     def __init__(self, d_model=64, M=2, r=2, L=32):
+#         """ Constructor
+#         Args:
+#             features: input channel dimensionality.
+#             WH: input spatial dimensionality, used for GAP kernel size.
+#             M: the number of branchs.
+#             G: num of convolution groups.
+#             r: the radio for compute d, the length of z.
+#             stride: stride, default 1.
+#             L: the minimum dim of the vector z in paper, default 32.
+#         """
+#         super(SKtgt, self).__init__()
+#         d = max(int(d_model/r), L)
+#         self.M = M
+#         self.d_model = d_model
+#         self.GA = 
+#         self.layer = 
+#         self.fc = nn.Linear(d_model, d)
+#         self.fcs = nn.ModuleList([])
+#         for i in range(M):
+#             self.fcs.append(
+#                 nn.Linear(d, d_model)
+#             )
+#         self.softmax = nn.Softmax(dim=1)
+        
+#     def forward(self, x):  #x[b,N,c]
+#         x1 = self.GA(x)
+#         x2 = self.layer(x)
+#         feas = torch.stack([x1, x2], dim=1)     #[b,2,N,c]
+#         fea_U = torch.sum(feas, dim=1)          #[b,N,c]
+#         fea_s = (fea_U).mean(dim=1)              #[b,c]
+#         fea_z = self.fc(fea_s)                  #线性层[b,d]
+#         for i, fc in enumerate(self.fcs):
+#             vector = fc(fea_z).unsqueeze_(dim=1)        #[b,1,c]
+#             if i == 0:
+#                 attention_vectors = vector
+#             else:
+#                 attention_vectors = torch.cat([attention_vectors, vector], dim=1)   #[b,2,c]
+#         attention_vectors = self.softmax(attention_vectors)   #  每个[b,c]都生成一个2维度权重    [b,2,c]
+#         attention_vectors = attention_vectors.unsqueeze(2)     #[b,2,1,c]
+#         fea_v = (feas * attention_vectors).sum(dim=1)   #把卷积结果按权重求和
+#         return fea_v
+
+
 class MSDeformableAttention(nn.Module):
     def __init__(self, embed_dim=256, num_heads=8, num_levels=4, num_points=4,):
         """
@@ -155,7 +213,6 @@ class TransformerDecoderLayer(nn.Module):
         self.dropout1 = nn.Dropout(dropout)
         self.norm1 = nn.LayerNorm(d_model)
         
-
         # cross attention
         self.cross_attn = MSDeformableAttention(d_model, n_head, n_levels, n_points)
         self.dropout2 = nn.Dropout(dropout)
@@ -194,11 +251,6 @@ class TransformerDecoderLayer(nn.Module):
                 query_pos_embed=None):      #[b,500,c]作为query的位置嵌入
         # self attention
         q = k = self.with_pos_embed(tgt, query_pos_embed)
-        # if attn_mask is not None:
-        #     attn_mask = torch.where(
-        #         attn_mask.to(torch.bool),
-        #         torch.zeros_like(attn_mask),
-        #         torch.full_like(attn_mask, float('-inf'), dtype=tgt.dtype))
 
         tgt2, _ = self.self_attn(q, k, value=tgt, attn_mask=attn_mask)
         tgt = tgt + self.dropout1(tgt2)
@@ -221,18 +273,6 @@ class TransformerDecoderLayer(nn.Module):
         return tgt
 
  
-class GroupSelfAttention(nn.Module):
-    def __init__(self, hidden_dim=256, nhead=8, dropout=0.0):
-        super().__init__()
-        self.self_attn = nn.MultiheadAttention(hidden_dim, nhead, dropout=dropout, batch_first=True)
-        self.norm = nn.LayerNorm(hidden_dim)
-
-    def forward(self, x, key_padding_mask):
-        # x: [B, N, C]
-        attn_out, _ = self.self_attn(x, x, x, key_padding_mask=key_padding_mask)   #注意key_padding_mask和attn_mask的区别
-        x = self.norm(x + attn_out)
-        return x
-
 
 class TransformerDecoder(nn.Module):    #参考点和偏移量全是预测得到的
     def __init__(self, hidden_dim, decoder_layer, num_layers, eval_idx=-1, num_queries=300, topk_ratio=0.5):
@@ -245,14 +285,24 @@ class TransformerDecoder(nn.Module):    #参考点和偏移量全是预测得到
 
         #额外引入 group self-attention
         # self.group_attn = GroupSelfAttention(hidden_dim, nhead=8)
-        self.num_queries = num_queries
-        self.topk_ratio = topk_ratio  # 比例，例如 0.3 表示 top 90 个为前景
+        # self.num_queries = num_queries
+        # self.topk_ratio = topk_ratio  # 比例，例如 0.3 表示 top 90 个为前景
         # 一个临时分类头，用来做粗分
         # self.temp_cls_head = nn.Linear(hidden_dim, 1)  # 二分类：前景/背景
+        
         self.conv_mixer = GatedResidualBlock1d(dim=256)
-        # self.conv_mixer = GNNMixer(dim=256)
-
-
+        # self.linear = nn.Linear(256, 256)
+        # self.norm = nn.LayerNorm(256)
+        #SKtgt
+        self.fc = nn.Linear(256, 128)
+        self.fcs = nn.ModuleList([])
+        for i in range(2):
+            self.fcs.append(
+                nn.Linear(128, 256)
+            )
+        self.softmax = nn.Softmax(dim=1)
+        
+        
     def forward(self,
                 tgt,                #合并后的[b,500,256]        在解码器中一直是 嵌入 的身份
                 ref_points_unact,   #合并后的[b,500,4]          在解码器中一直是 坐标预测（参考点） 的身份
@@ -279,12 +329,33 @@ class TransformerDecoder(nn.Module):    #参考点和偏移量全是预测得到
             query_pos_embed = query_pos_head(ref_points_detach)     #[b,500,4] -> [b,500,256]表示query的位置嵌入,
             
             group_logits = score_head[i](output)
-            output = grouped_self_conv(output, query_pos_embed, group_logits, self.conv_mixer, self.num_queries)
+            # output = grouped_self_conv(output,group_logits, self.conv_mixer, 300)
             
-            output = layer(output, ref_points_input, memory,        #解码器层  [b,500,256]
+            # output = layer(output, ref_points_input, memory,        #解码器层  [b,500,256]
+            #                memory_spatial_shapes, memory_level_start_index,
+            #                attn_mask, memory_mask, query_pos_embed,)
+
+            x1 = grouped_self_conv(output,group_logits, self.conv_mixer, 300)
+            x2 = layer(output, ref_points_input, memory,        #解码器层  [b,500,256]
                            memory_spatial_shapes, memory_level_start_index,
                            attn_mask, memory_mask, query_pos_embed,)
+            
+            feas = torch.stack([x1, x2], dim=1)     #[b,2,N,c]
+            fea_U = torch.sum(feas, dim=1)          #[b,N,c]
+            fea_s = (fea_U).mean(dim=1)              #[b,c]
+            fea_z = self.fc(fea_s)                  #线性层[b,d]
+            for k, fc in enumerate(self.fcs):
+                vector = fc(fea_z).unsqueeze(dim=1)        #[b,1,c]
+                if k == 0:
+                    attention_vectors = vector
+                else:
+                    attention_vectors = torch.cat([attention_vectors, vector], dim=1)   #[b,2,c]
+            attention_vectors = self.softmax(attention_vectors)   #  每个[b,c]都生成一个2维度权重    [b,2,c]
+            attention_vectors = attention_vectors.unsqueeze(2)     #[b,2,1,c]
+            output = (feas * attention_vectors).sum(dim=1)   #把卷积结果按权重求和
 
+            # output = output1 + output2
+            # output = self.norm(self.linear(output))   
             inter_ref_bbox = F.sigmoid(bbox_head[i](output) + inverse_sigmoid(ref_points_detach))   #bbox预测结果漂移量+参考点 [b,500,4]
 
             #查询最后预测 类别和BBOX偏移量
