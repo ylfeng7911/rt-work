@@ -1,5 +1,5 @@
 
-print_freq: 100
+print_freq: 20
 output_dir: './logs'
 checkpoint_freq: 100
 

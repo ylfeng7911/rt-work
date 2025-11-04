@@ -162,7 +162,7 @@ class RTDETRCriterion(nn.Module):
         
         # Consistency AR loss (图像级方差约束) ---
         # 按 batch 拆分：indices 里存了每张图匹配的预测id
-        loss_ar_cons_list = []          #计算每张图中AR的方差（AR是个统计量，这里用方差衡量偏移程度）
+        loss_ar_cons_list = []          #计算每张图中所有预测框AR的方差（AR是个统计量，这里用方差衡量偏移程度）
         for (src_idx, _) in indices:
             if len(src_idx) > 1:  # 至少2个目标才能算方差
                 ar_vals = (outputs['pred_boxes'][:, src_idx, 2] / 

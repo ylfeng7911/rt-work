@@ -13,7 +13,7 @@ from PIL import Image, ImageDraw
 from src.core import YAMLConfig
 
 
-def draw(images, labels, boxes, scores, thrh = 0.6):
+def draw(images, labels, boxes, scores, thrh = 0.2):
     for i, im in enumerate(images):
         draw = ImageDraw.Draw(im)
 
@@ -24,7 +24,7 @@ def draw(images, labels, boxes, scores, thrh = 0.6):
 
         for j,b in enumerate(box):
             draw.rectangle(list(b), outline='red',)
-            draw.text((b[0], b[1]), text=f"{lab[j].item()} {round(scrs[j].item(),2)}", fill='blue', )
+            draw.text((b[0], b[1]), text=f"{lab[j].item()} {round(scrs[j].item(), 3)}", fill='blue', )
 
         im.save(f'results_{i}.jpg')
 
@@ -69,7 +69,7 @@ def main(args, ):
     ])
     im_data = transforms(im_pil)[None].to(args.device)
 
-    output = model(im_data, orig_size)
+    output= model(im_data, orig_size)
     labels, boxes, scores = output
 
     draw([im_pil], labels, boxes, scores)
@@ -79,8 +79,8 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('-c', '--config', type=str, default='../configs/rtdetr/rtdetr_r50vd_6x_coco.yml')
-    parser.add_argument('-r', '--resume', type=str, default='../exps/20250905_222714/last.pth')
-    parser.add_argument('-f', '--im-file', type=str, default='../00002/00002.jpg')
-    parser.add_argument('-d', '--device', type=str, default='cuda:0')      #cpu
+    parser.add_argument('-r', '--resume', type=str, default='/root/fengyulei/exps/20251021_194853_UAVSwarm_RTDETR_CGA2_3MSGC/best.pth')
+    parser.add_argument('-f', '--im-file', type=str, default='../00002/UAVSwarm1.jpg')
+    parser.add_argument('-d', '--device', type=str, default='cuda:0')      #cpu 
     args = parser.parse_args()
     main(args)

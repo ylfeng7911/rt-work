@@ -39,7 +39,7 @@ def main(args, ) -> None:
     
 
 if __name__ == '__main__':
-    #CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --master_port=9909 --nproc_per_node=4 tools/train.py  
+    #CUDA_VISIBLE_DEVICES=0,1,2 torchrun --master_port=9909 --nproc_per_node=3 tools/train.py  
     
     parser = argparse.ArgumentParser()
     now = datetime.datetime.now()
@@ -52,8 +52,8 @@ if __name__ == '__main__':
     parser.add_argument('-d', '--device', type=str, help='device',)
     parser.add_argument('--seed', type=int, default= 0, help='exp reproducibility')
     parser.add_argument('--use-amp', action='store_true', default=True, help='auto mixed precision training')
-    parser.add_argument('--output-dir', type=str, default=f'/root/autodl-tmp/exps/{time_str}', help='output directoy')
-    parser.add_argument('--summary-dir', type=str, default=f'/root/autodl-tmp/exps/{time_str}', help='tensorboard summry')
+    parser.add_argument('--output-dir', type=str, default=f'/root/fengyulei/exps/{time_str}', help='output directoy')
+    parser.add_argument('--summary-dir', type=str, default=f'/root/fengyulei/exps/{time_str}', help='tensorboard summry')
     parser.add_argument('--test-only', action='store_true', default=False,)
 
     # priority 1

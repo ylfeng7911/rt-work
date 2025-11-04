@@ -91,8 +91,8 @@ def masks_to_boxes(masks):
 
 
 
-  # NWD
-def NWD(pred, target, eps=1e-7, constant=20, img_size=(640, 512)):#快速版实现
+  # NWD          multiUAV中C=20，UAVS中用80
+def NWD(pred, target, eps=1e-7, constant=80, img_size=(640, 512)):#快速版实现
     """
     Optimized NWD calculation with absolute coordinates.
     NWD计算时用的绝对坐标，如果不然，wasserstein_2算出来全趋近于0，最后取指数得到的全是1

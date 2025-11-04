@@ -83,7 +83,7 @@ def profile_stats(
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('-c', '--config', type=str, required=True)
+    parser.add_argument('-c', '--config', type=str, default='/root/fengyulei/rt-4-raw/configs/rtdetr/rtdetr_r50vd_6x_coco.yml')
     parser.add_argument('-d', '--device', type=str, default='cuda:0', help='device',)
     args = parser.parse_args()
 

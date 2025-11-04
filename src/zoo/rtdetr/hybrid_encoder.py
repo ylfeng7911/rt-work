@@ -12,6 +12,8 @@ from .utils import get_activation
 
 from ...core import register
 
+from .modules import BiFPN
+
 
 __all__ = ['HybridEncoder']
 
@@ -36,7 +38,7 @@ class ChannelAttention(nn.Module):
             nn.ReLU(inplace=True),
             nn.Dropout(p=0.1),                                              #添加正则化
             nn.Conv2d(in_channels // ratio, in_channels, 1, bias=False),
-            nn.BatchNorm2d(in_channels),                             #添加正则化
+            # nn.BatchNorm2d(in_channels),
         )
 
         self.sigmoid = nn.Sigmoid()
@@ -95,7 +97,7 @@ class CBAM(nn.Module):
 
 
 class SKConv(nn.Module):
-    def __init__(self, features=64, M=3, G=8, r=2, stride=1 ,L=32):
+    def __init__(self, features=256, M=3, G=8, r=2, stride=1 ,L=32):
         """ Constructor
         Args:
             features: input channel dimensionality.
@@ -146,6 +148,17 @@ class SKConv(nn.Module):
         fea_v = (feas * attention_vectors).sum(dim=1)   #把卷积结果按权重求和
         return fea_v
     
+class SK_block(nn.Module):
+    def __init__(self, act=None, groups=1):
+        super().__init__()
+        self.conv = SKConv()
+        self.norm = nn.BatchNorm2d(256)
+        self.act = nn.Identity() if act is None else get_activation(act) 
+
+    def forward(self, x):
+        return self.act(self.norm(self.conv(x)))
+
+
 
 class ConvNormLayer(nn.Module):
     def __init__(self, ch_in, ch_out, kernel_size, stride, padding=None, bias=False, act=None,groups=1):
@@ -165,30 +178,23 @@ class ConvNormLayer(nn.Module):
     def forward(self, x):
         return self.act(self.norm(self.conv(x)))
 
-
-class ASFF(nn.Module):      # 输入：4个不同尺度的特征图，输出：选定尺度的融合特征图
-    def __init__(self, level, rfb=False, vis=False, groups = 8):        # 从高到低
-        super(ASFF, self).__init__()
+class ASFF3(nn.Module):      # 输入：3个不同尺度的特征图，输出：选定尺度的融合特征图    
+    def __init__(self, level, rfb=False, vis=False, groups = 8):        # 初始化level:0最高，2最低
+        super(ASFF3, self).__init__()
         self.level = level
-        self.dim = [256, 256, 256, 256]
+        self.dim = [256, 256, 256]
         self.inter_dim = self.dim[self.level]   # 256
 
         if level == 0:
             self.stride_level_1 = ConvNormLayer(256, self.inter_dim, 3, 2, act='silu', groups=groups)
             self.stride_level_2 = ConvNormLayer(256, self.inter_dim, 3, 2, act='silu', groups=groups)
-            self.stride_level_3 = ConvNormLayer(256, self.inter_dim, 3, 2, act='silu', groups=groups)
             self.expand = ConvNormLayer(self.inter_dim, 256, 3, 1, act='silu', groups=groups)
 
         elif level == 1:
             self.stride_level_2 = ConvNormLayer(256, self.inter_dim, 3, 2, act='silu', groups=groups)
-            self.stride_level_3 = ConvNormLayer(256, self.inter_dim, 3, 2, act='silu', groups=groups)
             self.expand = ConvNormLayer(self.inter_dim, 256, 3, 1, act='silu', groups=groups)
 
         elif level == 2:
-            self.stride_level_3 = ConvNormLayer(256, self.inter_dim, 3, 2, act='silu', groups=groups)
-            self.expand = ConvNormLayer(self.inter_dim, 256, 3, 1, act='silu', groups=groups)
-
-        elif level == 3:
             self.expand = ConvNormLayer(self.inter_dim, 256, 3, 1, act='silu', groups=groups)
 
         # 压缩维度
@@ -197,53 +203,40 @@ class ASFF(nn.Module):      # 输入：4个不同尺度的特征图，输出：�
         self.weight_level_0 = ConvNormLayer(self.inter_dim, compress_c, 1, 1, act='silu')
         self.weight_level_1 = ConvNormLayer(self.inter_dim, compress_c, 1, 1, act='silu')
         self.weight_level_2 = ConvNormLayer(self.inter_dim, compress_c, 1, 1, act='silu')
-        self.weight_level_3 = ConvNormLayer(self.inter_dim, compress_c, 1, 1, act='silu')
 
-        self.weight_levels = nn.Conv2d(compress_c * 4, 4, kernel_size=1, stride=1, padding=0)
+        self.weight_levels = nn.Conv2d(compress_c * 3, 3, kernel_size=1, stride=1, padding=0)
         self.vis = vis
         self.dropout = nn.Dropout2d(p=0.2)
 
-    def forward(self, x_level_0, x_level_1, x_level_2, x_level_3):  # 4个尺度特征图
+    def forward(self, x_level_0, x_level_1, x_level_2):  # 4个尺度特征图   ,输入顺序是从小到大
         if self.level == 0:
             level_0_resized = x_level_0
             level_1_resized = self.stride_level_1(x_level_1)
             level_2_resized = self.stride_level_2(F.max_pool2d(x_level_2, 3, stride=2, padding=1))
-            level_3_resized = self.stride_level_3(F.max_pool2d(x_level_3, 3, stride=4, padding=1))
 
         elif self.level == 1:
             level_0_resized = F.interpolate(x_level_0, scale_factor=2, mode='nearest')
             level_1_resized = x_level_1
             level_2_resized = self.stride_level_2(x_level_2)
-            level_3_resized = self.stride_level_3(F.max_pool2d(x_level_3, 3, stride=2, padding=1))
 
         elif self.level == 2:
             level_0_resized = F.interpolate(x_level_0, scale_factor=4, mode='nearest')
             level_1_resized = F.interpolate(x_level_1, scale_factor=2, mode='nearest')
             level_2_resized = x_level_2
-            level_3_resized = self.stride_level_3(x_level_3)
-
-        elif self.level == 3:
-            level_0_resized = F.interpolate(x_level_0, scale_factor=8, mode='nearest')
-            level_1_resized = F.interpolate(x_level_1, scale_factor=4, mode='nearest')
-            level_2_resized = F.interpolate(x_level_2, scale_factor=2, mode='nearest')
-            level_3_resized = x_level_3
 
         # 权重计算
         level_0_weight_v = self.weight_level_0(level_0_resized)     #[b,8,h,w]
         level_1_weight_v = self.weight_level_1(level_1_resized)
         level_2_weight_v = self.weight_level_2(level_2_resized)
-        level_3_weight_v = self.weight_level_3(level_3_resized)
 
-        levels_weight_v = torch.cat((level_0_weight_v, level_1_weight_v, level_2_weight_v, level_3_weight_v), 1)    #[b,32,h,w]
-        levels_weight = self.weight_levels(levels_weight_v)         #[b,4,h,w]
-        levels_weight = F.softmax(levels_weight, dim=1)             #[b,4,h,w]
+        levels_weight_v = torch.cat((level_0_weight_v, level_1_weight_v, level_2_weight_v), 1)    #[b,24,h,w]
+        levels_weight = self.weight_levels(levels_weight_v)         #[b,3,h,w]
+        levels_weight = F.softmax(levels_weight, dim=1)             #[b,3,h,w]
 
         fused_out_reduced = (
             level_0_resized * levels_weight[:, 0:1, :, :] +
             level_1_resized * levels_weight[:, 1:2, :, :] +
-            level_2_resized * levels_weight[:, 2:3, :, :] +
-            level_3_resized * levels_weight[:, 3:4, :, :]
-        )
+            level_2_resized * levels_weight[:, 2:3, :, :]  )
 
         out = self.expand(fused_out_reduced)
 
@@ -255,24 +248,24 @@ class ASFF(nn.Module):      # 输入：4个不同尺度的特征图，输出：�
         
 
 
-class RepVggBlock(nn.Module):       #(卷积1 + 卷积3)-激活     H/W不变  
+class RepVggBlock(nn.Module):       #(卷积1 + 卷积3)-激活     H/W不变，C不变   特征融合的模块
     def __init__(self, ch_in, ch_out, act='relu'):
         super().__init__()
         self.ch_in = ch_in
         self.ch_out = ch_out
-        self.conv1 = ConvNormLayer(ch_in, ch_out, 3, 1, padding=1, act=None)
-        self.conv2 = ConvNormLayer(ch_in, ch_out, 1, 1, padding=0, act=None)
+        self.conv1 = ConvNormLayer(ch_in, ch_out, 3, 1, padding=1, act=None)        #3x3卷径，捕捉空间+通道特征
+        self.conv2 = ConvNormLayer(ch_in, ch_out, 1, 1, padding=0, act=None)        #1x1卷积，捕捉通道特征
         self.act = nn.Identity() if act is None else get_activation(act) 
 
     def forward(self, x):
-        if hasattr(self, 'conv'):
+        if hasattr(self, 'conv'):                       #推理时
             y = self.conv(x)
         else:
-            y = self.conv1(x) + self.conv2(x)
+            y = self.conv1(x) + self.conv2(x)           #训练时
 
         return self.act(y)
 
-    def convert_to_deploy(self):
+    def convert_to_deploy(self):    #重参数化（把1x1卷积和3x3卷积融合为一个3x3卷积），加快速度
         if not hasattr(self, 'conv'):
             self.conv = nn.Conv2d(self.ch_in, self.ch_out, 3, 1, padding=1)
 
@@ -306,11 +299,11 @@ class RepVggBlock(nn.Module):       #(卷积1 + 卷积3)-激活     H/W不变
         return kernel * t, beta - running_mean * gamma / std
 
 
-class CSPRepLayer(nn.Module):       #H/W不变
+class CSPRepLayer(nn.Module):       #H/W不变   特征融合模块
     def __init__(self,
-                 in_channels,
-                 out_channels,
-                 num_blocks=3,
+                 in_channels,               #512
+                 out_channels,              #256
+                 num_blocks=3,      
                  expansion=1.0,
                  bias=None,
                  act="silu"):
@@ -319,7 +312,7 @@ class CSPRepLayer(nn.Module):       #H/W不变
         self.conv1 = ConvNormLayer(in_channels, hidden_channels, 1, 1, bias=bias, act=act)
         self.conv2 = ConvNormLayer(in_channels, hidden_channels, 1, 1, bias=bias, act=act)
         self.bottlenecks = nn.Sequential(*[
-            RepVggBlock(hidden_channels, hidden_channels, act=act) for _ in range(num_blocks)
+            RepVggBlock(hidden_channels, hidden_channels, act=act) for _ in range(num_blocks)   #特征融合模块
         ])
         if hidden_channels != out_channels:
             self.conv3 = ConvNormLayer(hidden_channels, out_channels, 1, 1, bias=bias, act=act)
@@ -328,7 +321,7 @@ class CSPRepLayer(nn.Module):       #H/W不变
 
     def forward(self, x):
         x_1 = self.conv1(x)
-        x_1 = self.bottlenecks(x_1)
+        x_1 = self.bottlenecks(x_1)         #就是3个RepVgg特征融合模块串联
         x_2 = self.conv2(x)
         return self.conv3(x_1 + x_2)
 
@@ -432,15 +425,15 @@ class HybridEncoder(nn.Module):
         self.out_strides = feat_strides
         
         
-        # channel projection
+        # channel projection    编码器入口的映射是为了调整特征图的通道数，这里max图本来就256的，可以不用映射
         self.input_proj = nn.ModuleList()
+
         for in_channel in in_channels:
             if version == 'v1':
                 proj = nn.Sequential(
                     nn.Conv2d(in_channel, hidden_dim, kernel_size=1, bias=False),
                     nn.BatchNorm2d(hidden_dim))
-                
-                
+                       
             elif version == 'v2':
                 proj = nn.Sequential(OrderedDict([
                     ('conv', nn.Conv2d(in_channel, hidden_dim, kernel_size=1, bias=False)),
@@ -469,7 +462,7 @@ class HybridEncoder(nn.Module):
         for _ in range(len(in_channels) - 1, 0, -1):        #3,2
             self.lateral_convs.append(ConvNormLayer(hidden_dim, hidden_dim, 1, 1, act=act)) #1卷积-归一化-激活函数     C/H/W不变
             self.fpn_blocks.append(
-                CSPRepLayer(hidden_dim * 2, hidden_dim, round(3 * depth_mult), act=act, expansion=expansion))#3卷积-归一化-激活  C减半，H/W不变
+                CSPRepLayer(hidden_dim * 2, hidden_dim, round(3 * depth_mult), act=act, expansion=expansion))#降通道的特征融合  C减半，H/W不变
 
         # bottom-up pan
         self.downsample_convs = nn.ModuleList()
@@ -481,8 +474,11 @@ class HybridEncoder(nn.Module):
             )
             
         #CBAM,ASFF
-        self.CBAM_block = nn.ModuleList([CBAM(256) for i,ch in enumerate(in_channels)])
-        self.ASFF_block = nn.ModuleList([ASFF(i) for i,ch in enumerate(in_channels)])
+        # self.CBAM_block = nn.ModuleList([CBAM(256) for i,ch in enumerate(in_channels)])
+        # self.ASFF_block = nn.ModuleList([ASFF3(0),ASFF3(1),ASFF3(2)])     #ASFF_block的顺序是从高到低  
+        
+        # self.BiFPN_block = BiFPN([256,256,256], 256)
+        self.SK = SK_block()
         self._reset_parameters()
 
     def _reset_parameters(self):
@@ -515,8 +511,7 @@ class HybridEncoder(nn.Module):
 
     def forward(self, feats):
         assert len(feats) == len(self.in_channels)
-        proj_feats = [self.input_proj[i](feat) for i, feat in enumerate(feats)]     #1x1卷积--> c = 256
-        
+        proj_feats = [self.input_proj[i](feat) for i, feat in enumerate(feats)]     #1x1卷积--> c = 256  顺序从下往上
         # encoder   最高级特征图 应用编码器（交互语义信息）
         if self.num_encoder_layers > 0:
             for i, enc_ind in enumerate(self.use_encoder_idx):  #0,2
@@ -531,18 +526,20 @@ class HybridEncoder(nn.Module):
 
                 memory :torch.Tensor = self.encoder[i](src_flatten, pos_embed=pos_embed)
                 proj_feats[enc_ind] = memory.permute(0, 2, 1).reshape(-1, self.hidden_dim, h, w).contiguous()   #[b,c,h,w]
+                #SK
+                proj_feats[enc_ind] = self.SK(proj_feats[enc_ind])
 
         # broadcasting and fusion
-        # FPN：inner_outs变为：从下往上3层融合特征图E1 E2 E3(代码逻辑很绕，结合论文图来看)
+        # FPN：inner_outs变为：从下往上3层融合特征图(代码逻辑很绕，结合论文图来看)，FPN网络是自顶向下的，融合方式是concat+映射
         inner_outs = [proj_feats[-1]]      
         for idx in range(len(self.in_channels) - 1, 0, -1):     #2,1        理解：上层（论文中F5和S4）经1x1卷积+2倍插值和下层融合
-            feat_heigh = inner_outs[0]          # S5    E2'
-            feat_low = proj_feats[idx - 1]      # S4    S3
+            feat_heigh = inner_outs[0]         
+            feat_low = proj_feats[idx - 1]      
             feat_heigh = self.lateral_convs[len(self.in_channels) - 1 - idx](feat_heigh)    #1x1卷积，下标是0,1,2
-            inner_outs[0] = feat_heigh          # E3    E2
+            inner_outs[0] = feat_heigh         
             upsample_feat = F.interpolate(feat_heigh, scale_factor=2., mode='nearest')  #上采样
             inner_out = self.fpn_blocks[len(self.in_channels)-1-idx](torch.concat([upsample_feat, feat_low], dim=1))#concat再减半C
-            inner_outs.insert(0, inner_out)     #[E2',E3]    
+            inner_outs.insert(0, inner_out)        
 
         # PAN：outs是：E1和每一次PAN融合后的结果（尺度从下往上)      [b,256,h,w]
         outs = [inner_outs[0]]
@@ -553,8 +550,15 @@ class HybridEncoder(nn.Module):
             out = self.pan_blocks[idx](torch.concat([downsample_feat, feat_height], dim=1)) #concat再减半C
             outs.append(out)
 
-        CBAM_outs = [self.CBAM_block[i](outs[i]) for i in range(len(self.in_channels))]  #（尺度从下往上) 
-        ASFF_outs = [self.ASFF_block[i](CBAM_outs[3], CBAM_outs[2], CBAM_outs[1], CBAM_outs[0]) for i in range(len(self.in_channels))] #尺度从小到大
-        ASFF_outs.reverse()
+        # CBAM_outs = [self.CBAM_block[i](outs[i]) for i in range(len(self.in_channels))]  #（尺度从下往上) 
+        # ASFF_outs = [self.ASFF_block[i](CBAM_outs[2], CBAM_outs[1], CBAM_outs[0]) for i in range(len(self.in_channels))] #尺度从小到大
+        # ASFF_outs.reverse()
 
-        return ASFF_outs            #尺度从大到小
+
+        # CBAM_outs = [self.CBAM_block[i](inner_outs[i]) for i in range(len(self.in_channels))]  #（尺度从下往上) 
+        # ASFF_outs = [self.ASFF_block[i](outs[2], outs[1], outs[0]) for i in range(len(self.in_channels))] #尺度从小到大
+        # ASFF_outs.reverse()
+
+        # outs = self.BiFPN_block(proj_feats)
+        return outs            #尺度从大到小
+

@@ -19,19 +19,19 @@ PResNet:
   depth: 50
   variant: d
   freeze_at: 0
-  return_idx: [0, 1, 2, 3]
+  return_idx: [1, 2, 3]        # 0
   num_stages: 4
   freeze_norm: True
   pretrained: True #True 
 
 
 HybridEncoder:
-  in_channels: [256, 512, 1024, 2048]
-  feat_strides: [4, 8, 16, 32]
+  in_channels: [512, 1024, 2048]      #256
+  feat_strides: [8, 16, 32]           #4
 
   # intra
   hidden_dim: 256
-  use_encoder_idx: [3]
+  use_encoder_idx: [2]                #3
   num_encoder_layers: 1
   nhead: 8
   dim_feedforward: 1024
@@ -46,10 +46,10 @@ HybridEncoder:
   version: v1
 
 RTDETRTransformer:
-  feat_channels: [256, 256, 256, 256]
-  feat_strides: [4, 8, 16, 32]
+  feat_channels: [256, 256, 256]
+  feat_strides: [8, 16, 32]
   hidden_dim: 256
-  num_levels: 4       #3
+  num_levels: 3       #3
 
   num_layers: 6
   num_queries: 300
@@ -66,7 +66,7 @@ RTDETRPostProcessor:
 
 
 RTDETRCriterion:
-  weight_dict: {loss_vfl: 1, loss_bbox: 1, loss_giou: 0, loss_ar: 0.2, loss_NWD: 5}   #bbox=5,GIOU=2
+  weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_giou: 2, loss_ar: 0, loss_NWD: 0}   #bbox=5,GIOU=2
   losses: ['vfl', 'boxes', 'ar', 'NWD']
   alpha: 0.75
   gamma: 2.0

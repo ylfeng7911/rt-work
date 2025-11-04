@@ -30,6 +30,7 @@ class RTDETR(nn.Module):
         self.encoder = encoder              #RTDETRTransformer
         
     def forward(self, x, targets=None): #targets标注,字典列表，每个字典keys(['boxes', 'labels', 'image_id', 'area', 'iscrowd', 'orig_size', 'idx'])
+        samples = x
         x = self.backbone(x)            #特征图列表，下采样8,16,32
         x = self.encoder(x)             #编码器+PAN交互过的特征图列表，尺度从大到小，c=256
         x = self.decoder(x, targets)    #
@@ -42,3 +43,5 @@ class RTDETR(nn.Module):
             if hasattr(m, 'convert_to_deploy'):
                 m.convert_to_deploy()
         return self 
+
+#deploy和eval有些区别，前者在eval的基础上，还会有额外操作，例如把RepVgg模块重参数化。

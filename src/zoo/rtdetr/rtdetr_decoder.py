@@ -9,11 +9,14 @@ import torch
 import torch.nn as nn 
 import torch.nn.functional as F 
 import torch.nn.init as init 
+import os
+import numpy as np
+import cv2
 
 from .denoising import get_contrastive_denoising_training_group
 from .utils import deformable_attention_core_func, get_activation, inverse_sigmoid
 from .utils import bias_init_with_prob
-from .group_attention import grouped_self_attn
+from .group_attention import grouped_self_conv,grouped_self_conv_logits,grouped_self_attn,GatedResidualBlock1d
 
 from ...core import register
 
@@ -21,6 +24,141 @@ from ...core import register
 __all__ = ['RTDETRTransformer']
 
 
+def visualize_groups_on_image(
+    inter_ref_bbox, # [b, 300, 4], cxcywh, 归一化坐标
+    labels,         # [ 300], 一阶段分组标签
+    samples,        # [b, 3, h, w], 增强后的图像张量
+    save_dir, 
+    layer_idx,
+    new_labels,     # [300], 二阶段分组标签
+    fg_cluster_idx,
+    targets,
+    logits,
+):
+    """
+    在增强后的图像上绘制不同解码器层的预测框。
+    可视化一阶段和二阶段的分组情况，并分别保存。
+    """
+    # --- 辅助函数：执行核心的可视化和保存逻辑 ---
+    def _draw_and_save(labels_to_use, suffix):
+        """
+        根据给定的标签进行绘制，并用指定的后缀保存文件。
+        """
+        # 1. 获取增强后图像的尺寸和numpy数组
+        _, _, img_h, img_w = samples.shape
+        img_tensor = samples[0]
+        img_np = img_tensor.permute(1, 2, 0).cpu().numpy()
+        img_np = np.clip(img_np * 255, 0, 255).astype(np.uint8)
+
+        # 2. 处理预测框和标签
+        boxes_cxcywh_norm = inter_ref_bbox[0].detach().cpu().numpy()
+        labels_np = labels_to_use.detach().cpu().numpy()
+        
+        # logits形状: [1, 300, 2] -> [300, 2]
+        logits_np = logits[0].detach().cpu().numpy()
+
+        # 使用sigmoid将logits转换为概率，而不是softmax
+        # sigmoid(x) = 1 / (1 + exp(-x))
+        probs = 1 / (1 + np.exp(-logits_np))
+
+        print(probs.max())
+        # 提取前景（无人机）的概率，形状为 [300]
+        drone_scores = probs[:, 1]
+        
+        # 3. 坐标转换：归一化cxcywh -> 增强图像素坐标xyxy
+        boxes_cxcywh_pixels = boxes_cxcywh_norm * np.array([img_w, img_h, img_w, img_h])
+        cx, cy, w, h = boxes_cxcywh_pixels.T
+        x1 = cx - w / 2
+        y1 = cy - h / 2
+        x2 = cx + w / 2
+        y2 = cy + h / 2
+        boxes_xyxy = np.stack([x1, y1, x2, y2], axis=-1).astype(int)
+
+        # 4. 分组可视化
+        img_fg = img_np.copy()
+        img_bg = img_np.copy()
+        for i,b in enumerate(boxes_xyxy):
+            lbl = labels_np[i]
+            x1, y1, x2, y2 = b
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(img_w, x2), min(img_h, y2)
+            if x2 <= x1 or y2 <= y1: continue
+
+            color = (0, 0, 255) if lbl == fg_cluster_idx else (255, 0, 0) # 前景红色，背景蓝色
+            thickness = 2
+            
+            score = drone_scores[i]
+            score_text = f"{score:.2f}"
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.6
+            text_thickness = 1
+            (text_width, text_height), baseline = cv2.getTextSize(score_text, font, font_scale, text_thickness)
+            text_x = x1
+            text_y = y1 - text_height - baseline if y1 > text_height + baseline else y1 + text_height + baseline
+            
+            
+            if lbl == fg_cluster_idx:
+                cv2.rectangle(img_fg, (x1, y1), (x2, y2), color, thickness)
+                cv2.putText(img_fg, score_text, (text_x, text_y), font, font_scale, color, text_thickness)
+            else:
+                cv2.rectangle(img_bg, (x1, y1), (x2, y2), color, thickness)
+                cv2.putText(img_bg, score_text, (text_x, text_y), font, font_scale, color, text_thickness)
+                
+        # 5. 保存结果
+        layer_dir = os.path.join(save_dir, f"layer_{layer_idx}")
+        os.makedirs(layer_dir, exist_ok=True)
+        
+        save_path_fg = os.path.join(layer_dir, f"vis_foreground_{suffix}.jpg")
+        save_path_bg = os.path.join(layer_dir, f"vis_background_{suffix}.jpg")
+        
+        cv2.imwrite(save_path_fg, img_fg)
+        cv2.imwrite(save_path_bg, img_bg)
+        print(f"Saved visualization for layer {layer_idx} with suffix '{suffix}' to {layer_dir}")
+        
+         # --- 可视化并保存GT框 ---
+        # 1. 获取GT框数据
+        gt_boxes_cxcywh_norm = targets[0]['boxes'].detach().cpu().numpy()
+        
+        # 2. 坐标转换：归一化cxcywh -> 增强图像素坐标xyxy
+        # 这里的img_h和img_w在_draw_and_save函数外部已经定义，可以直接使用
+        gt_boxes_cxcywh_pixels = gt_boxes_cxcywh_norm * np.array([img_w, img_h, img_w, img_h])
+        cx, cy, w, h = gt_boxes_cxcywh_pixels.T
+        x1 = cx - w / 2
+        y1 = cy - h / 2
+        x2 = cx + w / 2
+        y2 = cy + h / 2
+        gt_boxes_xyxy = np.stack([x1, y1, x2, y2], axis=-1).astype(int)
+
+        # 3. 在原始图像副本上绘制GT框
+        img_gt = img_np.copy() # 使用之前已经准备好的img_np
+        gt_color = (0, 255, 0) # 使用绿色表示GT，以示区别
+        gt_thickness = 2
+        
+        for b in gt_boxes_xyxy:
+            x1, y1, x2, y2 = b
+            # 确保坐标在图像范围内
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(img_w, x2), min(img_h, y2)
+
+            if x2 <= x1 or y2 <= y1:
+                continue # 跳过无效框
+
+            cv2.rectangle(img_gt, (x1, y1), (x2, y2), gt_color, gt_thickness)
+
+        # 4. 保存GT可视化结果
+        save_path_gt = os.path.join(layer_dir, "vis_ground_truth.jpg")
+        cv2.imwrite(save_path_gt, img_gt)
+        print(f"Saved ground truth visualization for layer {layer_idx} to {layer_dir}")
+
+
+    # --- 主函数逻辑：调用辅助函数两次 ---
+    
+    # 第一次调用：可视化一阶段的分组情况
+    _draw_and_save(labels, suffix="stage1")
+    
+    # 第二次调用：可视化二阶段的分组情况
+    _draw_and_save(new_labels, suffix="stage2")
+    
 
 class MLP(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim, num_layers, act='relu'):
@@ -147,9 +285,9 @@ class TransformerDecoderLayer(nn.Module):
                  dropout=0.,
                  activation="relu",
                  n_levels=4,
-                 n_points=4,):
+                 n_points=4,
+                 ):
         super(TransformerDecoderLayer, self).__init__()
-
         # self attention
         self.self_attn = nn.MultiheadAttention(d_model, n_head, dropout=dropout, batch_first=True)
         self.dropout1 = nn.Dropout(dropout)
@@ -168,14 +306,7 @@ class TransformerDecoderLayer(nn.Module):
         self.linear2 = nn.Linear(dim_feedforward, d_model)
         self.dropout4 = nn.Dropout(dropout)
         self.norm3 = nn.LayerNorm(d_model)
-
-        # self._reset_parameters()
-
-    # def _reset_parameters(self):
-    #     linear_init_(self.linear1)
-    #     linear_init_(self.linear2)
-    #     xavier_uniform_(self.linear1.weight)
-    #     xavier_uniform_(self.linear2.weight)
+        
 
     def with_pos_embed(self, tensor, pos):
         return tensor if pos is None else tensor + pos
@@ -194,11 +325,6 @@ class TransformerDecoderLayer(nn.Module):
                 query_pos_embed=None):      #[b,500,c]作为query的位置嵌入
         # self attention
         q = k = self.with_pos_embed(tgt, query_pos_embed)
-        # if attn_mask is not None:
-        #     attn_mask = torch.where(
-        #         attn_mask.to(torch.bool),
-        #         torch.zeros_like(attn_mask),
-        #         torch.full_like(attn_mask, float('-inf'), dtype=tgt.dtype))
 
         tgt2, _ = self.self_attn(q, k, value=tgt, attn_mask=attn_mask)
         tgt = tgt + self.dropout1(tgt2)
@@ -221,18 +347,6 @@ class TransformerDecoderLayer(nn.Module):
         return tgt
 
  
-class GroupSelfAttention(nn.Module):
-    def __init__(self, hidden_dim=256, nhead=8, dropout=0.0):
-        super().__init__()
-        self.self_attn = nn.MultiheadAttention(hidden_dim, nhead, dropout=dropout, batch_first=True)
-        self.norm = nn.LayerNorm(hidden_dim)
-
-    def forward(self, x, attn_mask):
-        # x: [B, N, C]
-        attn_out, _ = self.self_attn(x, x, x, key_padding_mask=attn_mask)   #注意key_padding_mask和attn_mask的区别
-        x = self.norm(x + attn_out)
-        return x
-
 class TransformerDecoder(nn.Module):    #参考点和偏移量全是预测得到的
     def __init__(self, hidden_dim, decoder_layer, num_layers, eval_idx=-1, num_queries=300, topk_ratio=0.5):
         super(TransformerDecoder, self).__init__()
@@ -240,15 +354,19 @@ class TransformerDecoder(nn.Module):    #参考点和偏移量全是预测得到
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
         self.eval_idx = eval_idx if eval_idx >= 0 else num_layers + eval_idx
-        # self.prototype_embed = nn.Parameter(torch.randn(1, 1, hidden_dim))
-
-        #额外引入 group self-attention
-        self.group_attn = GroupSelfAttention(hidden_dim, nhead=8)
-        self.num_queries = num_queries
-        self.topk_ratio = topk_ratio  # 比例，例如 0.3 表示 top 90 个为前景
-        # 一个临时分类头，用来做粗分
-        self.temp_cls_head = nn.Linear(hidden_dim, 1)  # 二分类：前景/背景
-
+        
+        # self.attn_mixer = nn.ModuleList([
+        #     nn.MultiheadAttention(256, 8, dropout=0., batch_first=True) 
+        #     for _ in range(6)
+        # ])
+        self.conv_mixer = nn.ModuleList([
+            GatedResidualBlock1d(dim=256)
+            for _ in range(3)
+        ])
+        
+        self.dropout = nn.Dropout(0.)
+        self.norm = nn.LayerNorm(256)
+        
     def forward(self,
                 tgt,                #合并后的[b,500,256]        在解码器中一直是 嵌入 的身份
                 ref_points_unact,   #合并后的[b,500,4]          在解码器中一直是 坐标预测（参考点） 的身份
@@ -259,28 +377,40 @@ class TransformerDecoder(nn.Module):    #参考点和偏移量全是预测得到
                 score_head,
                 query_pos_head,
                 attn_mask=None,
-                memory_mask=None):  #无
+                memory_mask=None,
+                samples = None,
+                targets = None):  #无
         output = tgt
         dec_out_bboxes = []
         dec_out_logits = []
         ref_points_detach = F.sigmoid(ref_points_unact)
         
-        # B, N, C = tgt.shape
-        # proto = self.prototype_embed.expand(B, N, -1)  # [B, num_queries, C]
-        # output = tgt + proto
         
         for i, layer in enumerate(self.layers):
             ref_points_input = ref_points_detach.unsqueeze(2)       #[b,500,1,4] 这个是输入参考点（DDETR中是位置query直接预测的），不同于迭代更新的参考点（相当于query的位置编码，或者叫位置query）。在DDETR中前者是后者预测的
             query_pos_embed = query_pos_head(ref_points_detach)     #[b,500,4] -> [b,500,256]表示query的位置嵌入,
             
-            output = grouped_self_attn(output, self.temp_cls_head, self.group_attn, self.num_queries)
-            
-            output = layer(output, ref_points_input, memory,        #解码器层  [b,500,256]
-                           memory_spatial_shapes, memory_level_start_index,
+            if i >= 3:
+                group_logits = score_head[i](output)
+                if i==0:
+                    inter_ref_bbox =  F.sigmoid(bbox_head[i](output) + inverse_sigmoid(ref_points_detach)) #预测框
+                output2  = grouped_self_conv(output,group_logits, self.conv_mixer[i-3], inter_ref_bbox, 300)
+                
+                output = output + self.dropout(output2)
+                output = self.norm(output)
+
+                # visualize_groups_on_image(inter_ref_bbox[:,-300:,:],labels, samples,"./vis_CGA_results",i , new_labels_b, fg_idx, targets,group_logits[:,-300:,:])
+                
+            output = layer(output,  ref_points_input, memory,        #解码器层  [b,500,256]
+                           memory_spatial_shapes, memory_level_start_index, 
                            attn_mask, memory_mask, query_pos_embed,)
+
+            
 
             inter_ref_bbox = F.sigmoid(bbox_head[i](output) + inverse_sigmoid(ref_points_detach))   #bbox预测结果漂移量+参考点 [b,500,4]
 
+            
+            
             #查询最后预测 类别和BBOX偏移量
             if self.training:
                 dec_out_logits.append(score_head[i](output))    #类别预测
@@ -403,8 +533,7 @@ class RTDETRTransformer(nn.Module):
         self._reset_parameters()
 
     def _reset_parameters(self):
-        bias = bias_init_with_prob(0.05)        #0.01
-        init.constant_(self.decoder.temp_cls_head.bias, bias)
+        bias = bias_init_with_prob(0.03)        #0.01
         init.constant_(self.enc_score_head.bias, bias)
         init.constant_(self.enc_bbox_head.layers[-1].weight, 0)
         init.constant_(self.enc_bbox_head.layers[-1].bias, 0)
@@ -424,6 +553,7 @@ class RTDETRTransformer(nn.Module):
 
     def _build_input_proj_layer(self, feat_channels):
         self.input_proj = nn.ModuleList()       #输入映射：1x1卷积+归一化：调整C
+        
         for in_channels in feat_channels:
             self.input_proj.append(
                 nn.Sequential(OrderedDict([
@@ -446,6 +576,7 @@ class RTDETRTransformer(nn.Module):
     def _get_encoder_input(self, feats):
         # get projection features   3个特征图做映射
         proj_feats = [self.input_proj[i](feat) for i, feat in enumerate(feats)]     #[b,c,h,w]
+        
         if self.num_levels > len(proj_feats):
             len_srcs = len(proj_feats)
             for i in range(len_srcs, self.num_levels):
@@ -489,7 +620,7 @@ class RTDETRTransformer(nn.Module):
             grid_xy = torch.stack([grid_x, grid_y], -1)     #合成坐标[h,w,2]
             valid_WH = torch.tensor([w, h]).to(dtype)   #[h,w]
             grid_xy = (grid_xy.unsqueeze(0) + 0.5) / valid_WH   #让anchor落在网格中心并归一化   [1,h,w,2]
-            wh = torch.ones_like(grid_xy) * grid_size * (2.0 ** lvl)    #BBOX的宽高 [b,h,w,2] 。越高层越大
+            wh = torch.ones_like(grid_xy) * grid_size * (2.0 ** lvl)    #BBOX的宽高 [b,h,w,2] 。越高层越大:0.05->0.1->0.2.低层小锚框负责小目标，高层负责大锚框
             anchors.append(torch.concat([grid_xy, wh], -1).reshape(-1, h * w, 4))   #[b,h,w,4] -> [b,hw,4]
 
         anchors = torch.concat(anchors, 1).to(device)   #[b,sum_hw,4]
@@ -499,7 +630,7 @@ class RTDETRTransformer(nn.Module):
         # anchors[valid_mask] = torch.inf # valid_mask [1, 8400, 1]
         anchors = torch.where(valid_mask, anchors, torch.inf)   #合法不变，不合法令为inf
 
-        return anchors, valid_mask      #[b,sum_hw,4]   [b,sum_hw,1] 
+        return anchors, valid_mask      #[b,sum_hw,4]为[cx,cy,w,h]形式的锚点   [b,sum_hw,1] 
 
 
     def _get_decoder_input(self,
@@ -552,8 +683,7 @@ class RTDETRTransformer(nn.Module):
 
 
 
-    def forward(self, feats, targets=None):
-
+    def forward(self, feats, targets=None, samples=None):
         # input projection and embedding
         (memory, spatial_shapes, level_start_index) = self._get_encoder_input(feats)    #展平特征图和2列表
         
@@ -583,7 +713,9 @@ class RTDETRTransformer(nn.Module):
             self.dec_bbox_head,     #bbox预测 MLP
             self.dec_score_head,    #类别预测 线性层
             self.query_pos_head,    #MLP
-            attn_mask=attn_mask)
+            attn_mask=attn_mask,
+            samples= samples,
+            targets = targets)
 
         if self.training and dn_meta is not None:
             dn_out_bboxes, out_bboxes = torch.split(out_bboxes, dn_meta['dn_num_split'], dim=2)     #分成[6,b,300,4]和[6,b,200,4]
@@ -599,7 +731,7 @@ class RTDETRTransformer(nn.Module):
                 out['dn_aux_outputs'] = self._set_aux_loss(dn_out_logits, dn_out_bboxes)    ##  out['dn_aux_outputs'][0]  - [5]
                 out['dn_meta'] = dn_meta
 
-        return out
+        return out 
 
 
     @torch.jit.unused
@@ -608,4 +740,4 @@ class RTDETRTransformer(nn.Module):
         # doesn't support dictionary with non-homogeneous values, such
         # as a dict having both a Tensor and a list.
         return [{'pred_logits': a, 'pred_boxes': b}
-                for a, b in zip(outputs_class, outputs_coord)]
+                for a, b in zip(outputs_class, outputs_coord)]      #把两个tensor拼成2元素字典
