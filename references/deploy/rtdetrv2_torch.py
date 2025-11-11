@@ -24,9 +24,9 @@ def draw(images, labels, boxes, scores, thrh = 0.2):
 
         for j,b in enumerate(box):
             draw.rectangle(list(b), outline='red',)
-            draw.text((b[0], b[1]), text=f"{lab[j].item()} {round(scrs[j].item(), 3)}", fill='blue', )
+            # draw.text((b[0], b[1]), text=f"{lab[j].item()} {round(scrs[j].item(), 3)}", fill='blue', )
 
-        im.save(f'results_{i}.jpg')
+        im.save(f'results_{i}.jpg', quality=95)
 
 
 def main(args, ):
@@ -79,8 +79,8 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('-c', '--config', type=str, default='../configs/rtdetr/rtdetr_r50vd_6x_coco.yml')
-    parser.add_argument('-r', '--resume', type=str, default='/root/fengyulei/exps/20251021_194853_UAVSwarm_RTDETR_CGA2_3MSGC/best.pth')
-    parser.add_argument('-f', '--im-file', type=str, default='../00002/UAVSwarm1.jpg')
+    parser.add_argument('-r', '--resume', type=str, default='/home/fyl/workspace_fyl/exps/20251104_224414_UAVSwarm_CGA/best.pth')
+    parser.add_argument('-f', '--im-file', type=str, default='../test_scene/00012.jpg')
     parser.add_argument('-d', '--device', type=str, default='cuda:0')      #cpu 
     args = parser.parse_args()
     main(args)

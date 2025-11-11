@@ -39,12 +39,6 @@ def draw_results(image_pil, gt_boxes, gt_labels, pred_boxes, pred_labels, pred_s
         draw_pred.rectangle(list(box), outline='red', width=2)
         # draw_pred.text((box[0], box[1]), text=f"Pred:{lab.item()} {round(scr.item(),2)}", fill='red')
 
-    # 拼接两张图 (左右拼接)
-    w, h = im_gt.size
-    new_im = Image.new("RGB", (w * 2, h))
-    new_im.paste(im_gt, (0, 0))
-    new_im.paste(im_pred, (w, 0))
-
     # 计算预测框数量与GT框数量的差值
     diff = len(pred_boxes) - len(gt_boxes)
     text = f"Pred:{len(pred_boxes)} | GT:{len(gt_boxes)} | Diff:{diff}"
@@ -52,16 +46,24 @@ def draw_results(image_pil, gt_boxes, gt_labels, pred_boxes, pred_labels, pred_s
         text = text + ' 虚警'
     elif diff < 0:
         text = text + ' 漏检'
-    # 在拼接图上标注
-    from PIL import ImageFont
-    draw_final = ImageDraw.Draw(new_im)
-    try:
-        font = ImageFont.truetype("arial.ttf", 40)
-    except:
-        font = None
-    draw_final.text((10, 10), text, fill="yellow", font=font)
     
-    new_im.save(save_path,quality = 95)
+    # 拼接两张图 (左右拼接)
+    if diff != 0:        
+        w, h = im_gt.size
+        new_im = Image.new("RGB", (w * 2, h))
+        new_im.paste(im_gt, (0, 0))
+        new_im.paste(im_pred, (w, 0))
+        
+        # 在拼接图上标注
+        from PIL import ImageFont
+        draw_final = ImageDraw.Draw(new_im)
+        try:
+            font = ImageFont.truetype("arial.ttf", 40)
+        except:
+            font = None
+        draw_final.text((10, 10), text, fill="yellow", font=font)
+        
+        new_im.save(save_path,quality = 95)
 
 
 def main(args):
@@ -145,10 +147,10 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('-c', '--config', type=str, default='../configs/rtdetr/rtdetr_r50vd_6x_coco.yml')
-    parser.add_argument('-r', '--resume', type=str, default='../exps/20250905_222714/last.pth')
-    parser.add_argument('--img-dir', type=str, default='/root/autodl-tmp/TinyTinyCoco_format/val2017')  # 图像文件夹
-    parser.add_argument('--ann-file', type=str, default='/root/autodl-tmp/TinyTinyCoco_format/annotations/instances_val2017.json')  # COCO标注文件
-    parser.add_argument('--out-dir', type=str, default='./vis_results_qualitu')  # 保存目录
+    parser.add_argument('-r', '--resume', type=str, default='/home/fyl/workspace_fyl/exps/20251104_224414_UAVSwarm_CGA/best.pth')
+    parser.add_argument('--img-dir', type=str, default='/home/fyl/workspace_fyl/dataset/UAVSwarm_COCO/val2017')  # 图像文件夹
+    parser.add_argument('--ann-file', type=str, default='/home/fyl/workspace_fyl/dataset/UAVSwarm_COCO/annotations/instances_val2017.json')  # COCO标注文件
+    parser.add_argument('--out-dir', type=str, default='./vis_results_quality')  # 保存目录
     parser.add_argument('-d', '--device', type=str, default='cuda:0')
     args = parser.parse_args()
     main(args)

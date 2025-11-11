@@ -32,8 +32,10 @@ class RTDETR(nn.Module):
     def forward(self, x, targets=None): #targets标注,字典列表，每个字典keys(['boxes', 'labels', 'image_id', 'area', 'iscrowd', 'orig_size', 'idx'])
         samples = x
         x = self.backbone(x)            #特征图列表，下采样8,16,32
+        feat_max = x[0]
+        x = x[1:]
         x = self.encoder(x)             #编码器+PAN交互过的特征图列表，尺度从大到小，c=256
-        x = self.decoder(x, targets)    #
+        x = self.decoder(x, targets, feat_max)    #
 
         return x
     

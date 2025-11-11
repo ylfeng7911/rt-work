@@ -1,6 +1,6 @@
 """Copyright(c) 2023 lyuwenyu. All Rights Reserved.
 """
-
+import torch.nn.init as init 
 import math 
 import copy 
 from collections import OrderedDict
@@ -8,7 +8,7 @@ from collections import OrderedDict
 import torch 
 import torch.nn as nn 
 import torch.nn.functional as F 
-import torch.nn.init as init 
+
 import os
 import numpy as np
 import cv2
@@ -17,7 +17,7 @@ from .denoising import get_contrastive_denoising_training_group
 from .utils import deformable_attention_core_func, get_activation, inverse_sigmoid
 from .utils import bias_init_with_prob
 from .group_attention import grouped_self_conv,grouped_self_conv_logits,grouped_self_attn,GatedResidualBlock1d
-
+from .modules import MSDeformableAttention
 from ...core import register
 
 
@@ -175,106 +175,6 @@ class MLP(nn.Module):
 
 
 
-class MSDeformableAttention(nn.Module):
-    def __init__(self, embed_dim=256, num_heads=8, num_levels=4, num_points=4,):
-        """
-        Multi-Scale Deformable Attention Module
-        """
-        super(MSDeformableAttention, self).__init__()
-        self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.num_levels = num_levels
-        self.num_points = num_points
-        self.total_points = num_heads * num_levels * num_points
-
-        self.head_dim = embed_dim // num_heads
-        assert self.head_dim * num_heads == self.embed_dim, "embed_dim must be divisible by num_heads"
-
-        self.sampling_offsets = nn.Linear(embed_dim, self.total_points * 2,)
-        self.attention_weights = nn.Linear(embed_dim, self.total_points)
-        self.value_proj = nn.Linear(embed_dim, embed_dim)
-        self.output_proj = nn.Linear(embed_dim, embed_dim)
-
-        self.ms_deformable_attn_core = deformable_attention_core_func
-
-        self._reset_parameters()
-
-
-    def _reset_parameters(self):
-        # sampling_offsets
-        init.constant_(self.sampling_offsets.weight, 0)
-        thetas = torch.arange(self.num_heads, dtype=torch.float32) * (2.0 * math.pi / self.num_heads)
-        grid_init = torch.stack([thetas.cos(), thetas.sin()], -1)
-        grid_init = grid_init / grid_init.abs().max(-1, keepdim=True).values
-        grid_init = grid_init.reshape(self.num_heads, 1, 1, 2).tile([1, self.num_levels, self.num_points, 1])
-        scaling = torch.arange(1, self.num_points + 1, dtype=torch.float32).reshape(1, 1, -1, 1)
-        grid_init *= scaling
-        self.sampling_offsets.bias.data[...] = grid_init.flatten()
-
-        # attention_weights
-        init.constant_(self.attention_weights.weight, 0)
-        init.constant_(self.attention_weights.bias, 0)
-
-        # proj
-        init.xavier_uniform_(self.value_proj.weight)
-        init.constant_(self.value_proj.bias, 0)
-        init.xavier_uniform_(self.output_proj.weight)
-        init.constant_(self.output_proj.bias, 0)
-
-
-    def forward(self,
-                query,
-                reference_points,
-                value,
-                value_spatial_shapes,
-                value_mask=None):
-        """
-        Args:
-            query (Tensor): [bs, query_length, C]
-            reference_points (Tensor): [bs, query_length, n_levels, 2], range in [0, 1], top-left (0,0),
-                bottom-right (1, 1), including padding area
-            value (Tensor): [bs, value_length, C]
-            value_spatial_shapes (List): [n_levels, 2], [(H_0, W_0), (H_1, W_1), ..., (H_{L-1}, W_{L-1})]
-            value_level_start_index (List): [n_levels], [0, H_0*W_0, H_0*W_0+H_1*W_1, ...]
-            value_mask (Tensor): [bs, value_length], True for non-padding elements, False for padding elements
-
-        Returns:
-            output (Tensor): [bs, Length_{query}, C]
-        """
-        bs, Len_q = query.shape[:2]
-        Len_v = value.shape[1]
-
-        value = self.value_proj(value)
-        if value_mask is not None:
-            value_mask = value_mask.astype(value.dtype).unsqueeze(-1)
-            value *= value_mask
-        value = value.reshape(bs, Len_v, self.num_heads, self.head_dim)
-
-        sampling_offsets = self.sampling_offsets(query).reshape(bs, Len_q, self.num_heads, self.num_levels, self.num_points, 2)
-        attention_weights = self.attention_weights(query).reshape(bs, Len_q, self.num_heads, self.num_levels * self.num_points)
-        attention_weights = F.softmax(attention_weights, dim=-1).reshape(bs, Len_q, self.num_heads, self.num_levels, self.num_points)
-
-        if reference_points.shape[-1] == 2:
-            offset_normalizer = torch.tensor(value_spatial_shapes)
-            offset_normalizer = offset_normalizer.flip([1]).reshape(
-                1, 1, 1, self.num_levels, 1, 2)
-            sampling_locations = reference_points.reshape(
-                bs, Len_q, 1, self.num_levels, 1, 2
-            ) + sampling_offsets / offset_normalizer
-        elif reference_points.shape[-1] == 4:
-            sampling_locations = (
-                reference_points[:, :, None, :, None, :2] + sampling_offsets /
-                self.num_points * reference_points[:, :, None, :, None, 2:] * 0.5)
-        else:
-            raise ValueError(
-                "Last dim of reference_points must be 2 or 4, but get {} instead.".
-                format(reference_points.shape[-1]))
-
-        output = self.ms_deformable_attn_core(value, value_spatial_shapes, sampling_locations, attention_weights)
-
-        output = self.output_proj(output)
-
-        return output
 
 
 class TransformerDecoderLayer(nn.Module):
@@ -295,7 +195,7 @@ class TransformerDecoderLayer(nn.Module):
         
 
         # cross attention
-        self.cross_attn = MSDeformableAttention(d_model, n_head, n_levels, n_points)
+        self.cross_attn = MSDeformableAttention(d_model, n_head, 1, n_points)    #n_levels
         self.dropout2 = nn.Dropout(dropout)
         self.norm2 = nn.LayerNorm(d_model)
 
@@ -332,10 +232,10 @@ class TransformerDecoderLayer(nn.Module):
         # cross attention
         tgt2 = self.cross_attn(\
             self.with_pos_embed(tgt, query_pos_embed), 
-            reference_points, 
-            memory, 
-            memory_spatial_shapes, 
-            memory_mask)
+            reference_points,               #[b,500,1,4] 
+            memory,                         #[b,hw,256]
+            memory_spatial_shapes,          #[[80, 80], [40, 40], [20, 20]]
+            memory_mask)                    # None
         tgt = tgt + self.dropout2(tgt2)
         tgt = self.norm2(tgt)
 
@@ -355,10 +255,7 @@ class TransformerDecoder(nn.Module):    #参考点和偏移量全是预测得到
         self.num_layers = num_layers
         self.eval_idx = eval_idx if eval_idx >= 0 else num_layers + eval_idx
         
-        # self.attn_mixer = nn.ModuleList([
-        #     nn.MultiheadAttention(256, 8, dropout=0., batch_first=True) 
-        #     for _ in range(6)
-        # ])
+        # CGA
         self.conv_mixer = nn.ModuleList([
             GatedResidualBlock1d(dim=256)
             for _ in range(3)
@@ -367,6 +264,100 @@ class TransformerDecoder(nn.Module):    #参考点和偏移量全是预测得到
         self.dropout = nn.Dropout(0.)
         self.norm = nn.LayerNorm(256)
         
+        # #memory
+        # # 1) 全局记忆块 (Nc x C)，初始化为可学习向量；推理阶段冻结，不更新
+        # self.num_mem_blocks = 10
+        # self.mem_tau = 0.1
+        # self.mem_blocks = nn.Embedding(self.num_mem_blocks, hidden_dim)  # 10x256
+        # mem_heads = 8
+        # mem_comp_dim = 64
+        # nn.init.normal_(self.mem_blocks.weight, std=0.02)
+
+        # # 2) Memory Updater: 以 M 为Q, 以 Encoder输出 memory 为K/V 的多头注意力
+        # self.mem_update_attn = nn.MultiheadAttention(embed_dim=hidden_dim, 
+        #                                              num_heads=mem_heads, 
+        #                                              batch_first=True)
+        # # 3) Memory 融合 MLP: M_new = MLP([M, M_hat])
+        # self.mem_update_mlp = nn.Sequential(
+        #     nn.Linear(hidden_dim * 2, hidden_dim),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(hidden_dim, hidden_dim)
+        # )
+
+        # # 4) MASA（Memory-Augmented Self-Attn）所需的投影层：
+        # #    Q_proj, K_proj, V_proj 以及 记忆分支的 Wm_k/Wm_v 与 压缩FC
+        # self.Wq = nn.Linear(hidden_dim, hidden_dim)
+        # self.Wk = nn.Linear(hidden_dim, hidden_dim)
+        # self.Wv = nn.Linear(hidden_dim, hidden_dim)
+        # self.mem_fc = nn.Linear(hidden_dim, mem_comp_dim)     # FC(M) : 256 -> 64
+        # self.Wm_k = nn.Linear(mem_comp_dim, hidden_dim)       # Wm · FC(M) -> K
+        # self.Wm_v = nn.Linear(mem_comp_dim, hidden_dim)       # Wm · FC(M) -> V
+        # self.masa_attn = nn.MultiheadAttention(embed_dim=hidden_dim, 
+        #                                        num_heads=mem_heads, 
+        #                                        batch_first=True)
+        # self.masa_norm = nn.LayerNorm(hidden_dim)
+        # self.masa_drop = nn.Dropout(0.)
+        # # =========================
+        
+    def _memory_update(self, encoder_tokens, B):        #过程：M_hat = Attn(Q=M, K=U, V=U),  M_new = MLP([M, M_hat])
+        """
+        [Memory] Memory Updater
+        encoder_tokens: memory  # [B, sum_hw, C]  —— 即 Encoder 输出
+        过程：M_hat = Attn(Q=M, K=U, V=U),  M_new = MLP([M, M_hat])
+        训练阶段用 EMA 写回到 self.mem_blocks.weight；推理阶段跳过更新。
+        """
+        C = self.hidden_dim
+        # 取当前的全局记忆块 M，扩成批次维度 (B, Nc, C)
+        M = self.mem_blocks.weight.unsqueeze(0).expand(B, self.num_mem_blocks, C)  # [B, Nc, C]
+
+        # MultiHeadAttention 要求形状 [B, N, C] (batch_first=True)
+        # Q = M, K = U, V = U
+        M_hat, _ = self.mem_update_attn(query=M, key=encoder_tokens, value=encoder_tokens)  # [B, Nc, C]
+
+        # 融合：Concat(M, M_hat) -> MLP
+        M_cat = torch.cat([M, M_hat], dim=-1)            # [B, Nc, 2C]
+        M_new = self.mem_update_mlp(M_cat)               # [B, Nc, C]
+
+        # 只在训练阶段进行“在线写回”，采用EMA稳定更新到全局参数表
+        if self.training:
+            with torch.no_grad():
+                # 跨 batch 合并（取平均）再EMA写回
+                M_batch_mean = M_new.mean(dim=0)         # [Nc, C]
+                self.mem_blocks.weight.data.mul_(1 - self.mem_tau).add_(self.mem_tau * M_batch_mean.data)
+
+        # 返回本次前向用于 MASA 的记忆快照（不影响梯度流向 mem_blocks 权重）
+        return M_new.detach()    # 解码器使用该快照；全局权重已在上面 EMA 写回
+
+    def _masa(self, Q, M_snapshot, B):  #查询和M交互
+        """
+        [Memory] MASA：用记忆增强自注意力（替代/增强原Self-Attention）。
+        K = [Wk Q,  Wm · FC(M)],  V = [Wv Q,  Wm · FC(M)],  Q' = Wq Q
+        Q: [B, Nq, C]
+        M_snapshot: [B, Nc, C] (来自 _memory_update 返回的本批记忆快照)
+        返回：MASA后的输出 (做残差+Norm)
+        """
+        # Q/K/V 投影
+        Qq = self.Wq(Q)                      # [B, Nq, C]
+        Kq = self.Wk(Q)                      # [B, Nq, C]
+        Vq = self.Wv(Q)                      # [B, Nq, C]
+
+        # 记忆分支：FC 压缩 -> Wm 投影
+        M_comp = self.mem_fc(M_snapshot)     # [B, Nc, 64]
+        Mk = self.Wm_k(M_comp)               # [B, Nc, C]
+        Mv = self.Wm_v(M_comp)               # [B, Nc, C]
+
+        # 拼接得到 K/V
+        K = torch.cat([Kq, Mk], dim=1)       # [B, Nq + Nc, C]
+        V = torch.cat([Vq, Mv], dim=1)       # [B, Nq + Nc, C]
+
+        # 多头注意力（batch_first）
+        masa_out, _ = self.masa_attn(Qq, K, V)   # [B, Nq, C]
+
+        # 残差 & 归一化
+        out = self.masa_norm(Q + self.masa_drop(masa_out))
+        return out
+    
+    
     def forward(self,
                 tgt,                #合并后的[b,500,256]        在解码器中一直是 嵌入 的身份
                 ref_points_unact,   #合并后的[b,500,4]          在解码器中一直是 坐标预测（参考点） 的身份
@@ -385,11 +376,13 @@ class TransformerDecoder(nn.Module):    #参考点和偏移量全是预测得到
         dec_out_logits = []
         ref_points_detach = F.sigmoid(ref_points_unact)
         
-        
+        # B = output.size(0)
+        # M_snapshot = self._memory_update(encoder_tokens=memory, B=B)
         for i, layer in enumerate(self.layers):
             ref_points_input = ref_points_detach.unsqueeze(2)       #[b,500,1,4] 这个是输入参考点（DDETR中是位置query直接预测的），不同于迭代更新的参考点（相当于query的位置编码，或者叫位置query）。在DDETR中前者是后者预测的
             query_pos_embed = query_pos_head(ref_points_detach)     #[b,500,4] -> [b,500,256]表示query的位置嵌入,
             
+            # output[:, -300:, :] = self._masa(output[:, -300:, :], M_snapshot, B) 
             if i >= 3:
                 group_logits = score_head[i](output)
                 if i==0:
@@ -405,12 +398,8 @@ class TransformerDecoder(nn.Module):    #参考点和偏移量全是预测得到
                            memory_spatial_shapes, memory_level_start_index, 
                            attn_mask, memory_mask, query_pos_embed,)
 
-            
-
             inter_ref_bbox = F.sigmoid(bbox_head[i](output) + inverse_sigmoid(ref_points_detach))   #bbox预测结果漂移量+参考点 [b,500,4]
 
-            
-            
             #查询最后预测 类别和BBOX偏移量
             if self.training:
                 dec_out_logits.append(score_head[i](output))    #类别预测
@@ -530,6 +519,9 @@ class RTDETRTransformer(nn.Module):
         if self.eval_spatial_size:
             self.anchors, self.valid_mask = self._generate_anchors()
 
+        # 最大特征图
+
+        
         self._reset_parameters()
 
     def _reset_parameters(self):
@@ -605,7 +597,7 @@ class RTDETRTransformer(nn.Module):
 
     def _generate_anchors(self,
                           spatial_shapes=None,
-                          grid_size=0.05,
+                          grid_size=0.05,       #0.05偏大了点可能
                           dtype=torch.float32,
                           device='cpu'):
         if spatial_shapes is None:  #推理的时候？
@@ -683,9 +675,14 @@ class RTDETRTransformer(nn.Module):
 
 
 
-    def forward(self, feats, targets=None, samples=None):
+    def forward(self, feats, targets=None, feat_max = None, samples=None):
         # input projection and embedding
         (memory, spatial_shapes, level_start_index) = self._get_encoder_input(feats)    #展平特征图和2列表
+        
+        b,c,h,w = feat_max.shape
+        feat_max =  feat_max.permute(0, 2, 3, 1).reshape(b, h * w, c)            #[b,hw,c]
+        spatial_shapes_max = [[h,w]]
+        level_start_index_max = 0
         
         # prepare denoising training
         if self.training and self.num_denoising > 0:
@@ -701,15 +698,15 @@ class RTDETRTransformer(nn.Module):
             denoising_class, denoising_bbox_unact, attn_mask, dn_meta = None, None, None, None
 
         target, init_ref_points_unact, enc_topk_bboxes, enc_topk_logits = \
-            self._get_decoder_input(memory, spatial_shapes, denoising_class, denoising_bbox_unact)      
+            self._get_decoder_input(memory, spatial_shapes, denoising_class, denoising_bbox_unact)  #解码器输入    
 
         # decoder
         out_bboxes, out_logits = self.decoder(                  #[6,b,500,4],[6,b,500,2]
             target,                 #合并后的类别查询
             init_ref_points_unact,  #合并后的bbox查询
-            memory,
-            spatial_shapes,
-            level_start_index,
+            feat_max,             #memory
+            spatial_shapes_max,
+            level_start_index_max,
             self.dec_bbox_head,     #bbox预测 MLP
             self.dec_score_head,    #类别预测 线性层
             self.query_pos_head,    #MLP

@@ -12,7 +12,7 @@ from .utils import get_activation
 
 from ...core import register
 
-from .modules import BiFPN
+from .modules import HLFFF,ConvNormLayer,DSConv
 
 
 __all__ = ['HybridEncoder']
@@ -160,23 +160,6 @@ class SK_block(nn.Module):
 
 
 
-class ConvNormLayer(nn.Module):
-    def __init__(self, ch_in, ch_out, kernel_size, stride, padding=None, bias=False, act=None,groups=1):
-        super().__init__()
-        self.conv = nn.Conv2d(
-            ch_in, 
-            ch_out, 
-            kernel_size, 
-            stride, 
-            padding=(kernel_size-1)//2 if padding is None else padding, 
-            groups = groups,
-            bias=bias,
-            )
-        self.norm = nn.BatchNorm2d(ch_out)
-        self.act = nn.Identity() if act is None else get_activation(act) 
-
-    def forward(self, x):
-        return self.act(self.norm(self.conv(x)))
 
 class ASFF3(nn.Module):      # 输入：3个不同尺度的特征图，输出：选定尺度的融合特征图    
     def __init__(self, level, rfb=False, vis=False, groups = 8):        # 初始化level:0最高，2最低
@@ -245,7 +228,8 @@ class ASFF3(nn.Module):      # 输入：3个不同尺度的特征图，输出：
         else:
             return self.dropout(out)
 
-        
+
+
 
 
 class RepVggBlock(nn.Module):       #(卷积1 + 卷积3)-激活     H/W不变，C不变   特征融合的模块
@@ -478,7 +462,23 @@ class HybridEncoder(nn.Module):
         # self.ASFF_block = nn.ModuleList([ASFF3(0),ASFF3(1),ASFF3(2)])     #ASFF_block的顺序是从高到低  
         
         # self.BiFPN_block = BiFPN([256,256,256], 256)
-        self.SK = SK_block()
+        # self.SK = SK_block()
+        
+        # HLFFF
+        # self.HLFFF_block1 = HLFFF(256)
+        # self.HLFFF_block2 = HLFFF(256)
+        # self.HLFFF_downSample2 = nn.Sequential(
+        #     ConvNormLayer(hidden_dim, hidden_dim, 3, 2, act=act),
+        #     DSConv(hidden_dim, hidden_dim, 3, 2, act=act)
+        #     )
+
+        # self.HLFFF_downSample1 = ConvNormLayer(hidden_dim, hidden_dim, 3, 2, act=act)
+        
+        
+        # self.HLFFF_block0 = HLFFF(256)
+        # self.HLFFF_proj = ConvNormLayer(hidden_dim * 2, hidden_dim, 1, 1)
+        
+        
         self._reset_parameters()
 
     def _reset_parameters(self):
@@ -526,8 +526,7 @@ class HybridEncoder(nn.Module):
 
                 memory :torch.Tensor = self.encoder[i](src_flatten, pos_embed=pos_embed)
                 proj_feats[enc_ind] = memory.permute(0, 2, 1).reshape(-1, self.hidden_dim, h, w).contiguous()   #[b,c,h,w]
-                #SK
-                proj_feats[enc_ind] = self.SK(proj_feats[enc_ind])
+
 
         # broadcasting and fusion
         # FPN：inner_outs变为：从下往上3层融合特征图(代码逻辑很绕，结合论文图来看)，FPN网络是自顶向下的，融合方式是concat+映射
@@ -541,6 +540,7 @@ class HybridEncoder(nn.Module):
             inner_out = self.fpn_blocks[len(self.in_channels)-1-idx](torch.concat([upsample_feat, feat_low], dim=1))#concat再减半C
             inner_outs.insert(0, inner_out)        
 
+        
         # PAN：outs是：E1和每一次PAN融合后的结果（尺度从下往上)      [b,256,h,w]
         outs = [inner_outs[0]]
         for idx in range(len(self.in_channels) - 1):        #0,1           理解：下层（论文中）经过下采样后和上层融合
@@ -554,11 +554,20 @@ class HybridEncoder(nn.Module):
         # ASFF_outs = [self.ASFF_block[i](CBAM_outs[2], CBAM_outs[1], CBAM_outs[0]) for i in range(len(self.in_channels))] #尺度从小到大
         # ASFF_outs.reverse()
 
-
         # CBAM_outs = [self.CBAM_block[i](inner_outs[i]) for i in range(len(self.in_channels))]  #（尺度从下往上) 
         # ASFF_outs = [self.ASFF_block[i](outs[2], outs[1], outs[0]) for i in range(len(self.in_channels))] #尺度从小到大
         # ASFF_outs.reverse()
 
-        # outs = self.BiFPN_block(proj_feats)
+        # outs = inner_outs
+        #  HLFFF 替换out1,out2
+        # outs0_down1 = self.HLFFF_downSample1(outs[0])
+        # outs[1] = self.HLFFF_block1(outs[1],outs0_down1)
+        
+        # outs0_down2 = self.HLFFF_downSample2(outs[0])
+        # outs[2] = self.HLFFF_block2(outs[2],outs0_down2)
+        
+        
+        # outs_fuse = self.HLFFF_proj(torch.cat([outs[1], F.interpolate(outs[2], scale_factor=2., mode='nearest')], dim = 1))
+        # outs[0] = self.HLFFF_block0(outs[0],F.interpolate(outs_fuse, scale_factor=2., mode='nearest'))
         return outs            #尺度从大到小
 
